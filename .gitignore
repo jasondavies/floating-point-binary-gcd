@@ -1,0 +1,23 @@
+# Binaries
+gcd_fp32
+gcd_bench
+gcd_bench_u53
+exact_threshold_search
+
+# CUDA outputs
+*.ptx
+*.cubin
+*.fatbin
+
+# Objects
+*.o
+*.obj
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Editor files
+*.swp
+*.swo
+*~
