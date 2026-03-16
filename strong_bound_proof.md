@@ -3,8 +3,8 @@
 ## Scope
 
 This proof is for the reduced forward dynamics, which is exactly the setting
-used by the reverse search: every reverse-search state is reduced, meaning
-`gcd(a, b) = 1`, with `a >= b > 0`.
+used by the reverse search: every non-root reverse-search state is reduced,
+meaning `gcd(a, b) = 1`, with `a >= b > 0`.
 
 That is the only setting needed for admissibility of the pruning bound inside
 the reduced reverse graph.
@@ -54,8 +54,8 @@ and then periodic with slope `3/5`.
 
 The theorem to prove is:
 
-> For every reduced state `(a, b)` and every valid forward continuation of
-> `s` more steps from `(a, b)`, the top bit-length drops by at least
+> For every valid forward trajectory of reduced states of length `s`, the top
+> bit-length drops by at least
 > `min_drop_for_steps_strong(s)`.
 
 In other words, if `(a_0, b_0) -> (a_1, b_1) -> ... -> (a_s, b_s)` is any
@@ -64,7 +64,7 @@ valid forward trajectory through reduced states, with `a_i >= b_i > 0` for
 
 `M(a_0, b_0) - M(a_s, b_s) >= min_drop_for_steps_strong(s)`.
 
-## 1. Normalization disappears on reduced states
+## 1. Normalization is trivial on reduced states
 
 ### Lemma 1
 
@@ -568,8 +568,7 @@ But Corollary 13 shows that this pattern is impossible. Contradiction. `qed`
 
 ### Theorem 15
 
-For every reduced state `(a, b)` and every valid forward continuation of
-`s` more steps from `(a, b)`,
+For every valid forward trajectory through reduced states of length `s`,
 
 `M(a_0, b_0) - M(a_s, b_s) >= min_drop_for_steps_strong(s)`.
 
