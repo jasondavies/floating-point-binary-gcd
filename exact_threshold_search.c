@@ -24,7 +24,6 @@ typedef struct {
     int k;
     uint64_t limit;
     int target_depth;
-    int bound_mode;
     uint64_t visits;
     uint64_t visit_limit;
     uint64_t progress_interval;
@@ -51,7 +50,6 @@ typedef struct {
     int k;
     uint64_t limit;
     int target_depth;
-    int bound_mode;
     uint64_t visits;
     uint64_t visit_limit;
     size_t seen_capacity;
@@ -393,12 +391,9 @@ static int min_drop_for_steps_strong(int steps) {
     return 3 * (steps / 5) + remainder_drop[steps % 5];
 }
 
-static int upper_additional_steps(Pair p, int k, int bound_mode) {
+static int upper_additional_steps(Pair p, int k) {
     int delta = k - bit_length_u64(p.a);
     int steps = 0;
-    if (bound_mode == 0) {
-        return 2 * delta + 1;
-    }
     while (min_drop_for_steps_strong(steps + 1) <= delta) {
         steps += 1;
     }
@@ -479,7 +474,6 @@ static int generate_predecessors(Pair state, int k, uint64_t limit, Pair *out) {
 static void search_context_init(SearchContext *ctx,
                                 int k,
                                 int target_depth,
-                                int bound_mode,
                                 uint64_t visit_limit,
                                 uint64_t progress_interval,
                                 size_t seen_capacity) {
@@ -487,7 +481,6 @@ static void search_context_init(SearchContext *ctx,
     ctx->k = k;
     ctx->limit = limit_for_bits(k);
     ctx->target_depth = target_depth;
-    ctx->bound_mode = bound_mode;
     ctx->visit_limit = visit_limit;
     ctx->progress_interval = progress_interval;
     ctx->seen_capacity = seen_capacity;
@@ -501,14 +494,12 @@ static void search_context_destroy(SearchContext *ctx) {
 static void collect_context_init(CollectContext *ctx,
                                  int k,
                                  int target_depth,
-                                 int bound_mode,
                                  uint64_t visit_limit,
                                  size_t seen_capacity) {
     memset(ctx, 0, sizeof(*ctx));
     ctx->k = k;
     ctx->limit = limit_for_bits(k);
     ctx->target_depth = target_depth;
-    ctx->bound_mode = bound_mode;
     ctx->visit_limit = visit_limit;
     ctx->seen_capacity = seen_capacity;
     depth_table_init(&ctx->seen, seen_capacity);
@@ -551,8 +542,7 @@ static void dfs_threshold(SearchContext *ctx, Pair state, uint8_t depth) {
         return;
     }
 
-    if ((int)depth + upper_additional_steps(state, ctx->k, ctx->bound_mode) <
-        ctx->target_depth) {
+    if ((int)depth + upper_additional_steps(state, ctx->k) < ctx->target_depth) {
         return;
     }
 
@@ -591,8 +581,7 @@ static void dfs_collect(CollectContext *ctx, Pair state, uint8_t depth) {
         return;
     }
 
-    if ((int)depth + upper_additional_steps(state, ctx->k, ctx->bound_mode) <
-        ctx->target_depth) {
+    if ((int)depth + upper_additional_steps(state, ctx->k) < ctx->target_depth) {
         return;
     }
 
@@ -614,14 +603,14 @@ static void dfs_collect(CollectContext *ctx, Pair state, uint8_t depth) {
 static void usage(const char *prog) {
     fprintf(stderr,
             "usage: %s search <k> <target-depth> [visit-limit] [progress-interval] "
-            "[bound-mode] [start-a start-b start-depth]\n"
+            "[start-a start-b start-depth]\n"
             "       %s frontier <k> <depth>\n"
             "       %s parallel <k> <target-depth> <frontier-depth> "
-            "[threads] [visit-limit] [bound-mode]\n"
-            "       %s max <k> <frontier-depth> [threads] [visit-limit] [bound-mode]\n"
-            "       %s table <n> <frontier-depth> [threads] [visit-limit] [bound-mode]\n"
-            "       %s pareto <k> <frontier-depth> [threads] [visit-limit] [bound-mode]\n"
-            "       %s pareto_table <n> <frontier-depth> [threads] [visit-limit] [bound-mode]\n",
+            "[threads] [visit-limit]\n"
+            "       %s max <k> <frontier-depth> [threads] [visit-limit]\n"
+            "       %s table <n> <frontier-depth> [threads] [visit-limit]\n"
+            "       %s pareto <k> <frontier-depth> [threads] [visit-limit]\n"
+            "       %s pareto_table <n> <frontier-depth> [threads] [visit-limit]\n",
             prog,
             prog,
             prog,
@@ -678,7 +667,7 @@ static int run_search_mode(int argc, char **argv) {
     Pair start = {1, 0};
     uint8_t start_depth = 0;
 
-    if (argc < 4 || argc > 10) {
+    if (argc < 4 || argc > 9) {
         usage(argv[0]);
     }
 
@@ -688,13 +677,12 @@ static int run_search_mode(int argc, char **argv) {
     ctx.visit_limit = (argc >= 5) ? strtoull(argv[4], NULL, 10) : 100000000ULL;
     ctx.progress_interval =
         (argc >= 6) ? strtoull(argv[5], NULL, 10) : 0ULL;
-    ctx.bound_mode = (argc >= 7) ? atoi(argv[6]) : 0;
-    if (argc == 10) {
-        start.a = strtoull(argv[7], NULL, 10);
-        start.b = strtoull(argv[8], NULL, 10);
-        start_depth = (uint8_t)strtoul(argv[9], NULL, 10);
+    if (argc == 9) {
+        start.a = strtoull(argv[6], NULL, 10);
+        start.b = strtoull(argv[7], NULL, 10);
+        start_depth = (uint8_t)strtoul(argv[8], NULL, 10);
         start = normalize_pair(start);
-    } else if (argc != 4 && argc != 5 && argc != 6 && argc != 7) {
+    } else if (argc != 4 && argc != 5 && argc != 6) {
         usage(argv[0]);
     }
 
@@ -710,7 +698,6 @@ static int run_search_mode(int argc, char **argv) {
     search_context_init(&ctx,
                         ctx.k,
                         ctx.target_depth,
-                        ctx.bound_mode,
                         ctx.visit_limit,
                         ctx.progress_interval,
                         1u << 20);
@@ -718,10 +705,9 @@ static int run_search_mode(int argc, char **argv) {
 
     dfs_threshold(&ctx, start, start_depth);
 
-    printf("k=%d target=%d bound_mode=%d found=%d visits=%llu states=%zu\n",
+    printf("k=%d target=%d found=%d visits=%llu states=%zu\n",
            ctx.k,
            ctx.target_depth,
-           ctx.bound_mode,
            ctx.found,
            (unsigned long long)ctx.visits,
            ctx.seen.size);
@@ -742,7 +728,6 @@ typedef struct {
     Frontier *frontier;
     int k;
     int target_depth;
-    int bound_mode;
     uint64_t visit_limit;
     atomic_size_t next_index;
     atomic_ullong total_visits;
@@ -756,7 +741,6 @@ typedef struct {
     Frontier *frontier;
     int k;
     int target_depth;
-    int bound_mode;
     uint64_t visit_limit;
     atomic_size_t next_index;
     atomic_ullong total_visits;
@@ -816,7 +800,6 @@ static void *parallel_worker(void *arg) {
         search_context_init(&ctx,
                             control->k,
                             control->target_depth,
-                            control->bound_mode,
                             control->visit_limit,
                             0,
                             1u << 16);
@@ -867,7 +850,6 @@ static void *pareto_worker(void *arg) {
         collect_context_init(&ctx,
                              control->k,
                              control->target_depth,
-                             control->bound_mode,
                              control->visit_limit,
                              1u << 16);
         depth_table_set(&ctx.seen, start, start_depth);
@@ -900,8 +882,7 @@ static ThresholdResult parallel_threshold_search(Frontier *frontier,
                                                  int k,
                                                  int target_depth,
                                                  int thread_count,
-                                                 uint64_t visit_limit,
-                                                 int bound_mode) {
+                                                 uint64_t visit_limit) {
     ParallelControl control;
     pthread_t *threads;
     WorkerArgs *args;
@@ -914,7 +895,6 @@ static ThresholdResult parallel_threshold_search(Frontier *frontier,
     control.frontier = frontier;
     control.k = k;
     control.target_depth = target_depth;
-    control.bound_mode = bound_mode;
     control.visit_limit = visit_limit;
     atomic_init(&control.next_index, 0);
     atomic_init(&control.total_visits, 0);
@@ -958,8 +938,7 @@ static ParetoResult parallel_collect_pareto(Frontier *frontier,
                                             int k,
                                             int target_depth,
                                             int thread_count,
-                                            uint64_t visit_limit,
-                                            int bound_mode) {
+                                            uint64_t visit_limit) {
     ParetoControl control;
     pthread_t *threads;
     WorkerArgs *args;
@@ -973,7 +952,6 @@ static ParetoResult parallel_collect_pareto(Frontier *frontier,
     control.frontier = frontier;
     control.k = k;
     control.target_depth = target_depth;
-    control.bound_mode = bound_mode;
     control.visit_limit = visit_limit;
     atomic_init(&control.next_index, 0);
     atomic_init(&control.total_visits, 0);
@@ -1021,7 +999,6 @@ static MaxResult exact_max_for_k(int k,
                                  int frontier_depth,
                                  int thread_count,
                                  uint64_t visit_limit,
-                                 int bound_mode,
                                  int lower_bound,
                                  int verbose) {
     Frontier frontier;
@@ -1060,11 +1037,10 @@ static MaxResult exact_max_for_k(int k,
     while (lo + 1 < hi) {
         int mid = lo + (hi - lo) / 2;
         ThresholdResult result = parallel_threshold_search(
-            &frontier, k, mid, thread_count, visit_limit, bound_mode);
+            &frontier, k, mid, thread_count, visit_limit);
         if (verbose) {
-            printf("check target=%d bound_mode=%d found=%d visits=%llu\n",
+            printf("check target=%d found=%d visits=%llu\n",
                    mid,
-                   bound_mode,
                    result.found,
                    (unsigned long long)result.visits);
         }
@@ -1092,11 +1068,10 @@ static int run_parallel_mode(int argc, char **argv) {
     int frontier_depth;
     int thread_count;
     uint64_t visit_limit;
-    int bound_mode;
     Frontier frontier;
     ThresholdResult result;
 
-    if (argc < 5 || argc > 8) {
+    if (argc < 5 || argc > 7) {
         usage(argv[0]);
     }
 
@@ -1105,7 +1080,6 @@ static int run_parallel_mode(int argc, char **argv) {
     frontier_depth = atoi(argv[4]);
     thread_count = (argc >= 6) ? atoi(argv[5]) : default_thread_count();
     visit_limit = (argc >= 7) ? strtoull(argv[6], NULL, 10) : 100000000ULL;
-    bound_mode = (argc >= 8) ? atoi(argv[7]) : 0;
 
     if (k <= 0 || k > 63) {
         usage_invalid_k(argv[0], k);
@@ -1117,15 +1091,14 @@ static int run_parallel_mode(int argc, char **argv) {
 
     build_frontier(k, frontier_depth, &frontier);
     result = parallel_threshold_search(
-        &frontier, k, target_depth, thread_count, visit_limit, bound_mode);
+        &frontier, k, target_depth, thread_count, visit_limit);
 
-    printf("k=%d target=%d frontier_depth=%d threads=%d bound_mode=%d found=%d "
+    printf("k=%d target=%d frontier_depth=%d threads=%d found=%d "
            "visits=%llu frontier=%zu\n",
            k,
            target_depth,
            frontier_depth,
            thread_count,
-           bound_mode,
            result.found,
            (unsigned long long)result.visits,
            result.frontier_size);
@@ -1147,10 +1120,9 @@ static int run_max_mode(int argc, char **argv) {
     int frontier_depth;
     int thread_count;
     uint64_t visit_limit;
-    int bound_mode;
     MaxResult result;
 
-    if (argc < 4 || argc > 7) {
+    if (argc < 4 || argc > 6) {
         usage(argv[0]);
     }
 
@@ -1158,7 +1130,6 @@ static int run_max_mode(int argc, char **argv) {
     frontier_depth = atoi(argv[3]);
     thread_count = (argc >= 5) ? atoi(argv[4]) : default_thread_count();
     visit_limit = (argc >= 6) ? strtoull(argv[5], NULL, 10) : 100000000ULL;
-    bound_mode = (argc >= 7) ? atoi(argv[6]) : 0;
 
     if (k <= 0 || k > 63) {
         usage_invalid_k(argv[0], k);
@@ -1171,7 +1142,6 @@ static int run_max_mode(int argc, char **argv) {
                              frontier_depth,
                              thread_count,
                              visit_limit,
-                             bound_mode,
                              0,
                              1);
     if (result.limit_hit) {
@@ -1192,11 +1162,10 @@ static int run_table_mode(int argc, char **argv) {
     int frontier_depth;
     int thread_count;
     uint64_t visit_limit;
-    int bound_mode;
     int k;
     int lower_bound = 0;
 
-    if (argc < 4 || argc > 7) {
+    if (argc < 4 || argc > 6) {
         usage(argv[0]);
     }
 
@@ -1204,7 +1173,6 @@ static int run_table_mode(int argc, char **argv) {
     frontier_depth = atoi(argv[3]);
     thread_count = (argc >= 5) ? atoi(argv[4]) : default_thread_count();
     visit_limit = (argc >= 6) ? strtoull(argv[5], NULL, 10) : 100000000ULL;
-    bound_mode = (argc >= 7) ? atoi(argv[6]) : 0;
 
     if (n <= 0 || n > 63) {
         usage_invalid_n(argv[0], n);
@@ -1216,7 +1184,7 @@ static int run_table_mode(int argc, char **argv) {
     for (k = 1; k <= n; ++k) {
         MaxResult result =
             exact_max_for_k(
-                k, frontier_depth, thread_count, visit_limit, bound_mode, lower_bound, 0);
+                k, frontier_depth, thread_count, visit_limit, lower_bound, 0);
         if (result.limit_hit) {
             printf("k=%d visit_limit_hit=1\n", k);
             return 1;
@@ -1246,13 +1214,12 @@ static int run_pareto_mode(int argc, char **argv) {
     int frontier_depth;
     int thread_count;
     uint64_t visit_limit;
-    int bound_mode;
     int effective_frontier_depth;
     MaxResult max_result;
     Frontier frontier;
     ParetoResult pareto_result;
 
-    if (argc < 4 || argc > 7) {
+    if (argc < 4 || argc > 6) {
         usage(argv[0]);
     }
 
@@ -1260,7 +1227,6 @@ static int run_pareto_mode(int argc, char **argv) {
     frontier_depth = atoi(argv[3]);
     thread_count = (argc >= 5) ? atoi(argv[4]) : default_thread_count();
     visit_limit = (argc >= 6) ? strtoull(argv[5], NULL, 10) : 100000000ULL;
-    bound_mode = (argc >= 7) ? atoi(argv[6]) : 0;
 
     if (k <= 0 || k > 63) {
         usage_invalid_k(argv[0], k);
@@ -1270,7 +1236,7 @@ static int run_pareto_mode(int argc, char **argv) {
     }
 
     max_result = exact_max_for_k(
-        k, frontier_depth, thread_count, visit_limit, bound_mode, 0, 0);
+        k, frontier_depth, thread_count, visit_limit, 0, 0);
     if (max_result.limit_hit) {
         printf("visit_limit_hit=1\n");
         return 1;
@@ -1283,14 +1249,13 @@ static int run_pareto_mode(int argc, char **argv) {
 
     build_frontier(k, effective_frontier_depth, &frontier);
     pareto_result = parallel_collect_pareto(
-        &frontier, k, max_result.max_steps, thread_count, visit_limit, bound_mode);
+        &frontier, k, max_result.max_steps, thread_count, visit_limit);
 
-    printf("k=%d max_steps=%d frontier_depth=%d threads=%d bound_mode=%d pareto=%zu visits=%llu frontier=%zu\n",
+    printf("k=%d max_steps=%d frontier_depth=%d threads=%d pareto=%zu visits=%llu frontier=%zu\n",
            k,
            max_result.max_steps,
            effective_frontier_depth,
            thread_count,
-           bound_mode,
            pareto_result.pareto.size,
            (unsigned long long)pareto_result.visits,
            pareto_result.frontier_size);
@@ -1309,11 +1274,10 @@ static int run_pareto_table_mode(int argc, char **argv) {
     int frontier_depth;
     int thread_count;
     uint64_t visit_limit;
-    int bound_mode;
     int k;
     int lower_bound = 0;
 
-    if (argc < 4 || argc > 7) {
+    if (argc < 4 || argc > 6) {
         usage(argv[0]);
     }
 
@@ -1321,7 +1285,6 @@ static int run_pareto_table_mode(int argc, char **argv) {
     frontier_depth = atoi(argv[3]);
     thread_count = (argc >= 5) ? atoi(argv[4]) : default_thread_count();
     visit_limit = (argc >= 6) ? strtoull(argv[5], NULL, 10) : 100000000ULL;
-    bound_mode = (argc >= 7) ? atoi(argv[6]) : 0;
 
     if (n <= 0 || n > 63) {
         usage_invalid_n(argv[0], n);
@@ -1334,7 +1297,7 @@ static int run_pareto_table_mode(int argc, char **argv) {
         int effective_frontier_depth;
         MaxResult max_result =
             exact_max_for_k(
-                k, frontier_depth, thread_count, visit_limit, bound_mode, lower_bound, 0);
+                k, frontier_depth, thread_count, visit_limit, lower_bound, 0);
         Frontier frontier;
         ParetoResult pareto_result;
         size_t i;
@@ -1351,7 +1314,7 @@ static int run_pareto_table_mode(int argc, char **argv) {
 
         build_frontier(k, effective_frontier_depth, &frontier);
         pareto_result = parallel_collect_pareto(
-            &frontier, k, max_result.max_steps, thread_count, visit_limit, bound_mode);
+            &frontier, k, max_result.max_steps, thread_count, visit_limit);
 
         printf("k=%d max_steps=%d pareto=%zu\n",
                k,

@@ -208,5 +208,5 @@ python3 -m modal run modal_fp64_bench.py --use-fixed-pair --fixed-a 900719925474
 Exact threshold search:
 
 ```sh
-./exact_threshold_search parallel 53 86 0 1 5000000 1
+./exact_threshold_search parallel 53 86 0 1 5000000
 ```
