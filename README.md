@@ -210,3 +210,6 @@ Exact threshold search:
 ```sh
 ./exact_threshold_search parallel 53 86 0 1 5000000
 ```
+
+The exact-threshold search now uses `__uint128_t` internally for states, so it
+supports `k` up to `127` and prints witnesses in decimal.

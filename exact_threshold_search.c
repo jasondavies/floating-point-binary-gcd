@@ -3,13 +3,20 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <unistd.h>
 
+typedef __uint128_t u128;
+
+#define MAX_K_BITS 127
+#define MAX_PREDS (4 * MAX_K_BITS + 4)
+#define WORKER_STACK_SIZE (8u << 20)
+
 typedef struct {
-    uint64_t a;
-    uint64_t b;
+    u128 a;
+    u128 b;
 } Pair;
 
 typedef struct {
@@ -22,13 +29,14 @@ typedef struct {
 
 typedef struct {
     int k;
-    uint64_t limit;
+    u128 limit;
     int target_depth;
     uint64_t visits;
     uint64_t visit_limit;
     uint64_t progress_interval;
     size_t seen_capacity;
     DepthTable seen;
+    Pair *pred_buf;
     Pair witness;
     int found;
 } SearchContext;
@@ -48,33 +56,48 @@ typedef struct {
 
 typedef struct {
     int k;
-    uint64_t limit;
+    u128 limit;
     int target_depth;
     uint64_t visits;
     uint64_t visit_limit;
     size_t seen_capacity;
     DepthTable seen;
+    Pair *pred_buf;
     PairList pareto;
     int limit_hit;
 } CollectContext;
 
-static int generate_predecessors(Pair state, int k, uint64_t limit, Pair *out);
+static int generate_predecessors(Pair state, int k, u128 limit, Pair *out);
 
-static int bit_length_u64(uint64_t v) {
+static int bit_length_u128(u128 v) {
     if (v == 0) {
         return 0;
     }
-    return 64 - __builtin_clzll(v);
+    {
+        uint64_t hi = (uint64_t)(v >> 64);
+        if (hi != 0) {
+            return 128 - __builtin_clzll(hi);
+        }
+    }
+    return 64 - __builtin_clzll((uint64_t)v);
 }
 
-static uint64_t limit_for_bits(int k) {
-    if (k <= 0 || k > 63) {
+static int ctz_u128(u128 v) {
+    uint64_t lo = (uint64_t)v;
+    if (lo != 0) {
+        return __builtin_ctzll(lo);
+    }
+    return 64 + __builtin_ctzll((uint64_t)(v >> 64));
+}
+
+static u128 limit_for_bits(int k) {
+    if (k <= 0 || k > MAX_K_BITS) {
         return 0;
     }
-    return (UINT64_C(1) << k) - 1ULL;
+    return (((u128)1) << k) - 1;
 }
 
-static uint64_t gcd_u64(uint64_t a, uint64_t b) {
+static u128 gcd_u128(u128 a, u128 b) {
     if (a == 0) {
         return b;
     }
@@ -83,8 +106,8 @@ static uint64_t gcd_u64(uint64_t a, uint64_t b) {
     }
 
     {
-        int az = __builtin_ctzll(a);
-        int bz = __builtin_ctzll(b);
+        int az = ctz_u128(a);
+        int bz = ctz_u128(b);
         int shift = (az < bz) ? az : bz;
 
         a >>= az;
@@ -92,7 +115,7 @@ static uint64_t gcd_u64(uint64_t a, uint64_t b) {
 
         for (;;) {
             if (a > b) {
-                uint64_t tmp = a;
+                u128 tmp = a;
                 a = b;
                 b = tmp;
             }
@@ -101,7 +124,7 @@ static uint64_t gcd_u64(uint64_t a, uint64_t b) {
             if (b == 0) {
                 return a << shift;
             }
-            b >>= __builtin_ctzll(b);
+            b >>= ctz_u128(b);
         }
     }
 }
@@ -112,7 +135,7 @@ static Pair normalize_pair(Pair p) {
         return root;
     }
     {
-        uint64_t g = gcd_u64(p.a, p.b);
+        u128 g = gcd_u128(p.a, p.b);
         if (g > 1) {
             p.a /= g;
             p.b /= g;
@@ -122,15 +145,17 @@ static Pair normalize_pair(Pair p) {
 }
 
 static size_t hash_u64(uint64_t x);
+static size_t hash_u128(u128 x);
 
 static int pair_equal(Pair lhs, Pair rhs) {
     return lhs.a == rhs.a && lhs.b == rhs.b;
 }
 
 static size_t hash_pair(Pair p) {
-    uint64_t mixed = p.a ^ (p.b + 0x9e3779b97f4a7c15ULL +
-                            (p.a << 6) + (p.a >> 2));
-    return hash_u64(mixed);
+    size_t seed = hash_u128(p.a);
+    seed ^= hash_u128(p.b) + (size_t)0x9e3779b97f4a7c15ULL +
+            (seed << 6) + (seed >> 2);
+    return seed;
 }
 
 static int pair_cmp_desc(const void *lhs, const void *rhs) {
@@ -232,6 +257,59 @@ static size_t hash_u64(uint64_t x) {
     x *= 0xc4ceb9fe1a85ec53ULL;
     x ^= x >> 33;
     return (size_t)x;
+}
+
+static size_t hash_u128(u128 x) {
+    uint64_t lo = (uint64_t)x;
+    uint64_t hi = (uint64_t)(x >> 64);
+    size_t h = hash_u64(lo);
+    h ^= hash_u64(hi + 0x9e3779b97f4a7c15ULL) +
+         (size_t)0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+    return h;
+}
+
+static int parse_u128(const char *text, u128 *out) {
+    u128 value = 0;
+    const unsigned char *p = (const unsigned char *)text;
+    if (*p == '\0') {
+        return 0;
+    }
+    while (*p != '\0') {
+        unsigned digit;
+        if (!isdigit(*p)) {
+            return 0;
+        }
+        digit = (unsigned)(*p - '0');
+        if (value > ((((u128)-1) - digit) / 10)) {
+            return 0;
+        }
+        value = value * 10 + digit;
+        ++p;
+    }
+    *out = value;
+    return 1;
+}
+
+static void fprint_u128(FILE *out, u128 value) {
+    char buf[40];
+    size_t len = 0;
+    if (value == 0) {
+        fputc('0', out);
+        return;
+    }
+    while (value != 0) {
+        buf[len++] = (char)('0' + (value % 10));
+        value /= 10;
+    }
+    while (len != 0) {
+        fputc(buf[--len], out);
+    }
+}
+
+static void fprint_pair(FILE *out, Pair pair) {
+    fprint_u128(out, pair.a);
+    fputc(',', out);
+    fprint_u128(out, pair.b);
 }
 
 static void depth_table_init(DepthTable *table, size_t capacity_pow2) {
@@ -339,7 +417,7 @@ static void frontier_push(Frontier *frontier, Pair pair, uint8_t depth) {
 }
 
 static void build_frontier(int k, int target_depth, Frontier *frontier) {
-    uint64_t limit = limit_for_bits(k);
+    u128 limit = limit_for_bits(k);
     DepthTable seen;
     Frontier queue;
     size_t head = 0;
@@ -354,7 +432,7 @@ static void build_frontier(int k, int target_depth, Frontier *frontier) {
     while (head < queue.size) {
         Pair state = queue.pairs[head];
         uint8_t depth = queue.depths[head];
-        Pair preds[256];
+        Pair preds[MAX_PREDS];
         int count;
         int j;
         head += 1;
@@ -392,7 +470,7 @@ static int min_drop_for_steps_strong(int steps) {
 }
 
 static int upper_additional_steps(Pair p, int k) {
-    int delta = k - bit_length_u64(p.a);
+    int delta = k - bit_length_u128(p.a);
     int steps = 0;
     while (min_drop_for_steps_strong(steps + 1) <= delta) {
         steps += 1;
@@ -408,33 +486,37 @@ static void add_candidate(Pair *out, int *count, Pair candidate) {
             return;
         }
     }
+    if (*count >= MAX_PREDS) {
+        fprintf(stderr, "internal error: predecessor buffer too small\n");
+        exit(1);
+    }
     out[*count] = candidate;
     *count += 1;
 }
 
-static int generate_predecessors(Pair state, int k, uint64_t limit, Pair *out) {
+static int generate_predecessors(Pair state, int k, u128 limit, Pair *out) {
     int count = 0;
-    uint64_t x = state.a;
-    uint64_t y = state.b;
+    u128 x = state.a;
+    u128 y = state.b;
 
     if (y < x && x != 0) {
-        uint64_t b = x;
-        uint64_t r = y;
-        int bl = bit_length_u64(b);
+        u128 b = x;
+        u128 r = y;
+        int bl = bit_length_u128(b);
         int max_e = k - bl;
         int e;
         for (e = 0; e <= max_e; ++e) {
-            uint64_t t = b << e;
+            u128 t = b << e;
             if (t <= limit - r) {
-                uint64_t a = t + r;
-                if (bit_length_u64(a) == bl + e && a >= b) {
+                u128 a = t + r;
+                if (bit_length_u128(a) == bl + e && a >= b) {
                     Pair cand = {a, b};
                     add_candidate(out, &count, cand);
                 }
             }
             if (t > r) {
-                uint64_t a = t - r;
-                if (bit_length_u64(a) == bl + e && a >= b) {
+                u128 a = t - r;
+                if (bit_length_u128(a) == bl + e && a >= b) {
                     Pair cand = {a, b};
                     add_candidate(out, &count, cand);
                 }
@@ -443,23 +525,23 @@ static int generate_predecessors(Pair state, int k, uint64_t limit, Pair *out) {
     }
 
     if (y != 0) {
-        uint64_t b = y;
-        uint64_t r = x;
-        int bl = bit_length_u64(b);
+        u128 b = y;
+        u128 r = x;
+        int bl = bit_length_u128(b);
         int max_e = k - bl;
         int e;
         for (e = 0; e <= max_e; ++e) {
-            uint64_t t = b << e;
+            u128 t = b << e;
             if (t <= limit - r) {
-                uint64_t a = t + r;
-                if (bit_length_u64(a) == bl + e && a >= b) {
+                u128 a = t + r;
+                if (bit_length_u128(a) == bl + e && a >= b) {
                     Pair cand = {a, b};
                     add_candidate(out, &count, cand);
                 }
             }
             if (t > r) {
-                uint64_t a = t - r;
-                if (bit_length_u64(a) == bl + e && a >= b) {
+                u128 a = t - r;
+                if (bit_length_u128(a) == bl + e && a >= b) {
                     Pair cand = {a, b};
                     add_candidate(out, &count, cand);
                 }
@@ -485,9 +567,16 @@ static void search_context_init(SearchContext *ctx,
     ctx->progress_interval = progress_interval;
     ctx->seen_capacity = seen_capacity;
     depth_table_init(&ctx->seen, seen_capacity);
+    ctx->pred_buf =
+        malloc((size_t)(ctx->target_depth + 1) * MAX_PREDS * sizeof(Pair));
+    if (ctx->pred_buf == NULL) {
+        fprintf(stderr, "allocation failed for predecessor buffer\n");
+        exit(1);
+    }
 }
 
 static void search_context_destroy(SearchContext *ctx) {
+    free(ctx->pred_buf);
     depth_table_destroy(&ctx->seen);
 }
 
@@ -503,16 +592,23 @@ static void collect_context_init(CollectContext *ctx,
     ctx->visit_limit = visit_limit;
     ctx->seen_capacity = seen_capacity;
     depth_table_init(&ctx->seen, seen_capacity);
+    ctx->pred_buf =
+        malloc((size_t)(ctx->target_depth + 1) * MAX_PREDS * sizeof(Pair));
+    if (ctx->pred_buf == NULL) {
+        fprintf(stderr, "allocation failed for predecessor buffer\n");
+        exit(1);
+    }
     pair_list_init(&ctx->pareto, 16);
 }
 
 static void collect_context_destroy(CollectContext *ctx) {
+    free(ctx->pred_buf);
     pair_list_destroy(&ctx->pareto);
     depth_table_destroy(&ctx->seen);
 }
 
 static void dfs_threshold(SearchContext *ctx, Pair state, uint8_t depth) {
-    Pair preds[256];
+    Pair *preds = ctx->pred_buf + ((size_t)depth * MAX_PREDS);
     int count;
     int i;
 
@@ -524,12 +620,12 @@ static void dfs_threshold(SearchContext *ctx, Pair state, uint8_t depth) {
     if (ctx->progress_interval != 0 &&
         (ctx->visits % ctx->progress_interval) == 0) {
         fprintf(stderr,
-                "progress visits=%llu states=%zu depth=%u state=%" PRIu64 ",%" PRIu64 "\n",
+                "progress visits=%llu states=%zu depth=%u state=",
                 (unsigned long long)ctx->visits,
                 ctx->seen.size,
-                depth,
-                state.a,
-                state.b);
+                depth);
+        fprint_pair(stderr, state);
+        fputc('\n', stderr);
         fflush(stderr);
     }
     if (ctx->visits > ctx->visit_limit) {
@@ -562,7 +658,7 @@ static void dfs_threshold(SearchContext *ctx, Pair state, uint8_t depth) {
 }
 
 static void dfs_collect(CollectContext *ctx, Pair state, uint8_t depth) {
-    Pair preds[256];
+    Pair *preds = ctx->pred_buf + ((size_t)depth * MAX_PREDS);
     int count;
     int i;
 
@@ -622,12 +718,12 @@ static void usage(const char *prog) {
 }
 
 static void usage_invalid_k(const char *prog, int k) {
-    fprintf(stderr, "invalid k=%d; expected 1 <= k <= 63\n", k);
+    fprintf(stderr, "invalid k=%d; expected 1 <= k <= %d\n", k, MAX_K_BITS);
     usage(prog);
 }
 
 static void usage_invalid_n(const char *prog, int n) {
-    fprintf(stderr, "invalid n=%d; expected 1 <= n <= 63\n", n);
+    fprintf(stderr, "invalid n=%d; expected 1 <= n <= %d\n", n, MAX_K_BITS);
     usage(prog);
 }
 
@@ -643,19 +739,19 @@ static int run_frontier_mode(int argc, char **argv) {
 
     k = atoi(argv[2]);
     target_depth = atoi(argv[3]);
-    if (k <= 0 || k > 63) {
+    if (k <= 0 || k > MAX_K_BITS) {
         usage_invalid_k(argv[0], k);
     }
-    if (target_depth < 0) {
+    if (target_depth < 0 || target_depth > UINT8_MAX) {
         usage(argv[0]);
     }
 
     build_frontier(k, target_depth, &frontier);
     for (i = 0; i < frontier.size; ++i) {
-        printf("%" PRIu64 " %" PRIu64 " %u\n",
-               frontier.pairs[i].a,
-               frontier.pairs[i].b,
-               frontier.depths[i]);
+        fprint_u128(stdout, frontier.pairs[i].a);
+        fputc(' ', stdout);
+        fprint_u128(stdout, frontier.pairs[i].b);
+        printf(" %u\n", frontier.depths[i]);
     }
 
     frontier_destroy(&frontier);
@@ -666,6 +762,7 @@ static int run_search_mode(int argc, char **argv) {
     SearchContext ctx;
     Pair start = {1, 0};
     uint8_t start_depth = 0;
+    unsigned long parsed_start_depth = 0;
 
     if (argc < 4 || argc > 9) {
         usage(argv[0]);
@@ -678,20 +775,31 @@ static int run_search_mode(int argc, char **argv) {
     ctx.progress_interval =
         (argc >= 6) ? strtoull(argv[5], NULL, 10) : 0ULL;
     if (argc == 9) {
-        start.a = strtoull(argv[6], NULL, 10);
-        start.b = strtoull(argv[7], NULL, 10);
-        start_depth = (uint8_t)strtoul(argv[8], NULL, 10);
+        if (!parse_u128(argv[6], &start.a) || !parse_u128(argv[7], &start.b)) {
+            fprintf(stderr, "invalid start pair; expected unsigned decimal integers\n");
+            return 2;
+        }
+        parsed_start_depth = strtoul(argv[8], NULL, 10);
+        if (parsed_start_depth > UINT8_MAX) {
+            fprintf(stderr, "start depth must fit in uint8_t\n");
+            return 2;
+        }
+        start_depth = (uint8_t)parsed_start_depth;
         start = normalize_pair(start);
     } else if (argc != 4 && argc != 5 && argc != 6) {
         usage(argv[0]);
     }
 
-    if (ctx.k <= 0 || ctx.k > 63) {
-        fprintf(stderr, "invalid k=%d; expected 1 <= k <= 63\n", ctx.k);
+    if (ctx.k <= 0 || ctx.k > MAX_K_BITS) {
+        fprintf(stderr, "invalid k=%d; expected 1 <= k <= %d\n", ctx.k, MAX_K_BITS);
         return 2;
     }
     if (ctx.target_depth < 0) {
         fprintf(stderr, "target depth must be non-negative\n");
+        return 2;
+    }
+    if (ctx.target_depth > UINT8_MAX) {
+        fprintf(stderr, "target depth must fit in uint8_t\n");
         return 2;
     }
 
@@ -712,9 +820,9 @@ static int run_search_mode(int argc, char **argv) {
            (unsigned long long)ctx.visits,
            ctx.seen.size);
     if (ctx.found) {
-        printf("witness=%" PRIu64 ",%" PRIu64 "\n",
-               ctx.witness.a,
-               ctx.witness.b);
+        fputs("witness=", stdout);
+        fprint_pair(stdout, ctx.witness);
+        fputc('\n', stdout);
     }
     if (ctx.visits > ctx.visit_limit) {
         printf("visit_limit_hit=1\n");
@@ -884,6 +992,7 @@ static ThresholdResult parallel_threshold_search(Frontier *frontier,
                                                  int thread_count,
                                                  uint64_t visit_limit) {
     ParallelControl control;
+    pthread_attr_t attr;
     pthread_t *threads;
     WorkerArgs *args;
     int i;
@@ -908,11 +1017,19 @@ static ThresholdResult parallel_threshold_search(Frontier *frontier,
         fprintf(stderr, "allocation failed for threads\n");
         exit(1);
     }
+    if (pthread_attr_init(&attr) != 0) {
+        fprintf(stderr, "pthread_attr_init failed\n");
+        exit(1);
+    }
+    if (pthread_attr_setstacksize(&attr, WORKER_STACK_SIZE) != 0) {
+        fprintf(stderr, "pthread_attr_setstacksize failed\n");
+        exit(1);
+    }
 
     for (i = 0; i < thread_count; ++i) {
         args[i].control = &control;
         args[i].worker_id = i;
-        if (pthread_create(&threads[i], NULL, parallel_worker, &args[i]) != 0) {
+        if (pthread_create(&threads[i], &attr, parallel_worker, &args[i]) != 0) {
             fprintf(stderr, "pthread_create failed\n");
             exit(1);
         }
@@ -923,6 +1040,7 @@ static ThresholdResult parallel_threshold_search(Frontier *frontier,
     }
 
     pthread_mutex_destroy(&control.witness_mu);
+    pthread_attr_destroy(&attr);
     free(threads);
     free(args);
 
@@ -940,6 +1058,7 @@ static ParetoResult parallel_collect_pareto(Frontier *frontier,
                                             int thread_count,
                                             uint64_t visit_limit) {
     ParetoControl control;
+    pthread_attr_t attr;
     pthread_t *threads;
     WorkerArgs *args;
     int i;
@@ -965,11 +1084,19 @@ static ParetoResult parallel_collect_pareto(Frontier *frontier,
         fprintf(stderr, "allocation failed for threads\n");
         exit(1);
     }
+    if (pthread_attr_init(&attr) != 0) {
+        fprintf(stderr, "pthread_attr_init failed\n");
+        exit(1);
+    }
+    if (pthread_attr_setstacksize(&attr, WORKER_STACK_SIZE) != 0) {
+        fprintf(stderr, "pthread_attr_setstacksize failed\n");
+        exit(1);
+    }
 
     for (i = 0; i < thread_count; ++i) {
         args[i].control = &control;
         args[i].worker_id = i;
-        if (pthread_create(&threads[i], NULL, pareto_worker, &args[i]) != 0) {
+        if (pthread_create(&threads[i], &attr, pareto_worker, &args[i]) != 0) {
             fprintf(stderr, "pthread_create failed\n");
             exit(1);
         }
@@ -980,6 +1107,7 @@ static ParetoResult parallel_collect_pareto(Frontier *frontier,
     }
 
     pthread_mutex_destroy(&control.pareto_mu);
+    pthread_attr_destroy(&attr);
     free(threads);
     free(args);
 
@@ -1081,10 +1209,11 @@ static int run_parallel_mode(int argc, char **argv) {
     thread_count = (argc >= 6) ? atoi(argv[5]) : default_thread_count();
     visit_limit = (argc >= 7) ? strtoull(argv[6], NULL, 10) : 100000000ULL;
 
-    if (k <= 0 || k > 63) {
+    if (k <= 0 || k > MAX_K_BITS) {
         usage_invalid_k(argv[0], k);
     }
-    if (target_depth < 0 || frontier_depth < 0 ||
+    if (target_depth < 0 || target_depth > UINT8_MAX ||
+        frontier_depth < 0 || frontier_depth > UINT8_MAX ||
         frontier_depth > target_depth || thread_count <= 0) {
         usage(argv[0]);
     }
@@ -1103,9 +1232,9 @@ static int run_parallel_mode(int argc, char **argv) {
            (unsigned long long)result.visits,
            result.frontier_size);
     if (result.found) {
-        printf("witness=%" PRIu64 ",%" PRIu64 "\n",
-               result.witness.a,
-               result.witness.b);
+        fputs("witness=", stdout);
+        fprint_pair(stdout, result.witness);
+        fputc('\n', stdout);
     }
     if (result.limit_hit) {
         printf("visit_limit_hit=1\n");
@@ -1131,10 +1260,10 @@ static int run_max_mode(int argc, char **argv) {
     thread_count = (argc >= 5) ? atoi(argv[4]) : default_thread_count();
     visit_limit = (argc >= 6) ? strtoull(argv[5], NULL, 10) : 100000000ULL;
 
-    if (k <= 0 || k > 63) {
+    if (k <= 0 || k > MAX_K_BITS) {
         usage_invalid_k(argv[0], k);
     }
-    if (frontier_depth < 0 || thread_count <= 0) {
+    if (frontier_depth < 0 || frontier_depth > UINT8_MAX || thread_count <= 0) {
         usage(argv[0]);
     }
 
@@ -1150,9 +1279,9 @@ static int run_max_mode(int argc, char **argv) {
     }
     printf("max_steps=%d\n", result.max_steps);
     if (result.witness.a != 0) {
-        printf("witness=%" PRIu64 ",%" PRIu64 "\n",
-               result.witness.a,
-               result.witness.b);
+        fputs("witness=", stdout);
+        fprint_pair(stdout, result.witness);
+        fputc('\n', stdout);
     }
     return 0;
 }
@@ -1174,10 +1303,10 @@ static int run_table_mode(int argc, char **argv) {
     thread_count = (argc >= 5) ? atoi(argv[4]) : default_thread_count();
     visit_limit = (argc >= 6) ? strtoull(argv[5], NULL, 10) : 100000000ULL;
 
-    if (n <= 0 || n > 63) {
+    if (n <= 0 || n > MAX_K_BITS) {
         usage_invalid_n(argv[0], n);
     }
-    if (frontier_depth < 0 || thread_count <= 0) {
+    if (frontier_depth < 0 || frontier_depth > UINT8_MAX || thread_count <= 0) {
         usage(argv[0]);
     }
 
@@ -1189,11 +1318,9 @@ static int run_table_mode(int argc, char **argv) {
             printf("k=%d visit_limit_hit=1\n", k);
             return 1;
         }
-        printf("k=%d max_steps=%d witness=%" PRIu64 ",%" PRIu64 "\n",
-               k,
-               result.max_steps,
-               result.witness.a,
-               result.witness.b);
+        printf("k=%d max_steps=%d witness=", k, result.max_steps);
+        fprint_pair(stdout, result.witness);
+        fputc('\n', stdout);
         lower_bound = result.max_steps;
     }
 
@@ -1203,9 +1330,9 @@ static int run_table_mode(int argc, char **argv) {
 static void print_pareto_pairs(const PairList *pareto) {
     size_t i;
     for (i = 0; i < pareto->size; ++i) {
-        printf("witness=%" PRIu64 ",%" PRIu64 "\n",
-               pareto->pairs[i].a,
-               pareto->pairs[i].b);
+        fputs("witness=", stdout);
+        fprint_pair(stdout, pareto->pairs[i]);
+        fputc('\n', stdout);
     }
 }
 
@@ -1228,10 +1355,10 @@ static int run_pareto_mode(int argc, char **argv) {
     thread_count = (argc >= 5) ? atoi(argv[4]) : default_thread_count();
     visit_limit = (argc >= 6) ? strtoull(argv[5], NULL, 10) : 100000000ULL;
 
-    if (k <= 0 || k > 63) {
+    if (k <= 0 || k > MAX_K_BITS) {
         usage_invalid_k(argv[0], k);
     }
-    if (frontier_depth < 0 || thread_count <= 0) {
+    if (frontier_depth < 0 || frontier_depth > UINT8_MAX || thread_count <= 0) {
         usage(argv[0]);
     }
 
@@ -1286,10 +1413,10 @@ static int run_pareto_table_mode(int argc, char **argv) {
     thread_count = (argc >= 5) ? atoi(argv[4]) : default_thread_count();
     visit_limit = (argc >= 6) ? strtoull(argv[5], NULL, 10) : 100000000ULL;
 
-    if (n <= 0 || n > 63) {
+    if (n <= 0 || n > MAX_K_BITS) {
         usage_invalid_n(argv[0], n);
     }
-    if (frontier_depth < 0 || thread_count <= 0) {
+    if (frontier_depth < 0 || frontier_depth > UINT8_MAX || thread_count <= 0) {
         usage(argv[0]);
     }
 
@@ -1321,9 +1448,9 @@ static int run_pareto_table_mode(int argc, char **argv) {
                max_result.max_steps,
                pareto_result.pareto.size);
         for (i = 0; i < pareto_result.pareto.size; ++i) {
-            printf("witness=%" PRIu64 ",%" PRIu64 "\n",
-                   pareto_result.pareto.pairs[i].a,
-                   pareto_result.pareto.pairs[i].b);
+            fputs("witness=", stdout);
+            fprint_pair(stdout, pareto_result.pareto.pairs[i]);
+            fputc('\n', stdout);
         }
         if (pareto_result.limit_hit) {
             printf("k=%d visit_limit_hit=1\n", k);
