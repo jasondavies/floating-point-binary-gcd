@@ -213,3 +213,46 @@ Exact threshold search:
 
 The exact-threshold search now uses `__uint128_t` internally for states, so it
 supports `k` up to `128` and prints witnesses in decimal.
+
+The search works on the reduced reverse graph starting from the root state
+`(1,0)`. A state `(a,b)` at reverse depth `d` corresponds to an input that
+needs exactly `d` forward steps to reach the root.
+
+Available modes:
+
+- `frontier <k> <depth>`
+  Enumerate the reduced states exactly at reverse depth `depth` inside the
+  `k`-bit box. This is mostly a debugging/helper mode and is also the frontier
+  used by the parallel search modes.
+- `search <k> <target-depth> [visit-limit] [progress-interval] [start-a start-b start-depth]`
+  Run a single-threaded reverse search asking whether some reduced `k`-bit
+  input exists that needs at least `target-depth` steps. If one is found, the
+  tool prints `found=1` and a witness. The optional start triple lets you resume
+  from a known reverse node instead of the root.
+- `parallel <k> <target-depth> <frontier-depth> [threads] [visit-limit]`
+  Split the search by first building the reverse frontier at `frontier-depth`,
+  then search each shard in parallel. This is the main mode for threshold
+  questions at larger `k`.
+- `max <k> <frontier-depth> [threads] [visit-limit]`
+  Compute the exact maximum step count for `k`-bit inputs, if the search
+  completes within the visit budget. Internally this binary-searches the target
+  depth and uses the threshold search as a subroutine.
+- `table <n> <frontier-depth> [threads] [visit-limit]`
+  Run `max` for every `k = 1..n` and print a table of exact worst-case step
+  counts and witnesses.
+- `pareto <k> <frontier-depth> [threads] [visit-limit]`
+  First compute the exact maximum step count for the given `k`, then enumerate
+  the Pareto-minimal witnesses achieving that maximum.
+- `pareto_table <n> <frontier-depth> [threads] [visit-limit]`
+  Run `pareto` for every `k = 1..n`.
+
+Notes:
+
+- `frontier-depth` is a performance knob, not a semantic parameter. Larger
+  values create more independent shards for parallel work, but also make the
+  frontier itself more expensive to build and store.
+- `visit_limit_hit=1` means the result is incomplete because the search budget
+  was exhausted. In that case `max`, `table`, `pareto`, and `pareto_table` have
+  not proved exactness for that query.
+- The pruning rule is the formally verified strong bound in
+  `strong_bound_proof.md` / `StrongBoundProof.lean`.
