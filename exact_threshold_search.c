@@ -10,7 +10,7 @@
 
 typedef __uint128_t u128;
 
-#define MAX_K_BITS 127
+#define MAX_K_BITS 128
 #define MAX_PREDS (4 * MAX_K_BITS + 4)
 #define WORKER_STACK_SIZE (8u << 20)
 
@@ -93,6 +93,9 @@ static int ctz_u128(u128 v) {
 static u128 limit_for_bits(int k) {
     if (k <= 0 || k > MAX_K_BITS) {
         return 0;
+    }
+    if (k == MAX_K_BITS) {
+        return (u128)-1;
     }
     return (((u128)1) << k) - 1;
 }

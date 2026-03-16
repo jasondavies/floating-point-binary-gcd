@@ -212,4 +212,4 @@ Exact threshold search:
 ```
 
 The exact-threshold search now uses `__uint128_t` internally for states, so it
-supports `k` up to `127` and prints witnesses in decimal.
+supports `k` up to `128` and prints witnesses in decimal.
