@@ -73,6 +73,12 @@ TARGETS = {
         cuda_arch="sm_75",
         cuda_base_image=CUDA_BASE_IMAGE_DEFAULT,
     ),
+    "a100": TargetSpec(
+        name="a100",
+        gpu_type="A100-80GB",
+        cuda_arch="sm_80",
+        cuda_base_image=CUDA_BASE_IMAGE_DEFAULT,
+    ),
     "h100": TargetSpec(
         name="h100",
         gpu_type="H100!",
@@ -302,43 +308,70 @@ def render_markdown(results: list[RunResult], args: argparse.Namespace) -> str:
         target_results = results_by_target.get(target_name, [])
         if not target_results:
             continue
-        sample = target_results[0]
-        lines.extend(
-            [
-                f"## {sample.gpu_model}",
-                "",
-                f"- Modal request: `{sample.requested_gpu_type}`",
-                f"- CUDA arch: `{sample.cuda_arch}`",
-                f"- CUDA base image: `{sample.cuda_base_image}`",
-                f"- Driver: `{sample.gpu_driver}`",
-                f"- Reported memory: `{sample.gpu_memory_mib} MiB`",
-                "",
-                "| workload | fp/hybrid ns/call | Stein ns/call | speedup vs Stein |",
-                "| --- | ---: | ---: | ---: |",
-            ]
-        )
-        for benchmark in ("fp32_u24", "fp32_u32", "fp64_u53", "fp64_u64"):
-            bench_results = [result for result in target_results if result.benchmark == benchmark]
-            if not bench_results:
-                continue
-            fp_metric_name = next(
-                metric.name
-                for metric in bench_results[0].metrics
-                if not metric.name.startswith("stein_")
+
+        gpu_models: list[str] = []
+        for result in target_results:
+            if result.gpu_model not in gpu_models:
+                gpu_models.append(result.gpu_model)
+
+        for gpu_model in gpu_models:
+            gpu_results = [result for result in target_results if result.gpu_model == gpu_model]
+            sample = gpu_results[0]
+            driver_set = sorted({result.gpu_driver for result in gpu_results})
+            memory_set = sorted({result.gpu_memory_mib for result in gpu_results})
+
+            lines.extend(
+                [
+                    f"## {sample.gpu_model}",
+                    "",
+                    f"- Modal request: `{sample.requested_gpu_type}`",
+                    f"- CUDA arch: `{sample.cuda_arch}`",
+                    f"- CUDA base image: `{sample.cuda_base_image}`",
+                ]
             )
-            stein_metric_name = next(
-                metric.name
-                for metric in bench_results[0].metrics
-                if metric.name.startswith("stein_")
+            if len(driver_set) == 1:
+                lines.append(f"- Driver: `{driver_set[0]}`")
+            else:
+                lines.append(f"- Drivers seen: `{', '.join(driver_set)}`")
+            if len(memory_set) == 1:
+                lines.append(f"- Reported memory: `{memory_set[0]} MiB`")
+            else:
+                memory_text = ", ".join(f"{memory} MiB" for memory in memory_set)
+                lines.append(f"- Reported memory seen: `{memory_text}`")
+            if len(gpu_models) > 1:
+                lines.append(
+                    f"- Note: target `{target_name}` returned multiple exact GPU models; "
+                    "this section uses only runs from this model."
+                )
+            lines.extend(
+                [
+                    "",
+                    "| workload | fp/hybrid ns/call | Stein ns/call | speedup vs Stein |",
+                    "| --- | ---: | ---: | ---: |",
+                ]
             )
-            fp_metric = median_metric(target_results, benchmark, fp_metric_name)
-            stein_metric = median_metric(target_results, benchmark, stein_metric_name)
-            speedup = stein_metric.ns_per_call / fp_metric.ns_per_call
-            lines.append(
-                f"| {WORKLOAD_TITLES[benchmark]} | {fp_metric.ns_per_call:.3f} | "
-                f"{stein_metric.ns_per_call:.3f} | {speedup:.2f}x |"
-            )
-        lines.append("")
+            for benchmark in ("fp32_u24", "fp32_u32", "fp64_u53", "fp64_u64"):
+                bench_results = [result for result in gpu_results if result.benchmark == benchmark]
+                if not bench_results:
+                    continue
+                fp_metric_name = next(
+                    metric.name
+                    for metric in bench_results[0].metrics
+                    if not metric.name.startswith("stein_")
+                )
+                stein_metric_name = next(
+                    metric.name
+                    for metric in bench_results[0].metrics
+                    if metric.name.startswith("stein_")
+                )
+                fp_metric = median_metric(gpu_results, benchmark, fp_metric_name)
+                stein_metric = median_metric(gpu_results, benchmark, stein_metric_name)
+                speedup = stein_metric.ns_per_call / fp_metric.ns_per_call
+                lines.append(
+                    f"| {WORKLOAD_TITLES[benchmark]} | {fp_metric.ns_per_call:.3f} | "
+                    f"{stein_metric.ns_per_call:.3f} | {speedup:.2f}x |"
+                )
+            lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
 
