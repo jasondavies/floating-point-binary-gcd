@@ -24,7 +24,7 @@ search tool, and the accompanying proof artifacts.
 - `run_modal_repeats.py`
   Helper script for repeating Modal benchmark runs and summarizing results.
 - `benchmarks.md`
-  Modal benchmark results for the current H100/B200 runs.
+  Modal benchmark results for the current T4/H100/B200 runs.
 
 ## Floating-point GCD variant
 
@@ -103,7 +103,7 @@ the hot loop stays in the fp64 kernel.
 
 ## Benchmark results
 
-Current Modal H100/B200 benchmark runs are collected in `benchmarks.md`.
+Current Modal T4/H100/B200 benchmark runs are collected in `benchmarks.md`.
 
 Benchmarks were run on RTX 4090.
 

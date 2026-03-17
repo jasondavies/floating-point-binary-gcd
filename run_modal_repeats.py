@@ -67,6 +67,12 @@ class TargetSpec:
 
 
 TARGETS = {
+    "t4": TargetSpec(
+        name="t4",
+        gpu_type="T4",
+        cuda_arch="sm_75",
+        cuda_base_image=CUDA_BASE_IMAGE_DEFAULT,
+    ),
     "h100": TargetSpec(
         name="h100",
         gpu_type="H100!",
@@ -332,11 +338,6 @@ def render_markdown(results: list[RunResult], args: argparse.Namespace) -> str:
                 f"| {WORKLOAD_TITLES[benchmark]} | {fp_metric.ns_per_call:.3f} | "
                 f"{stein_metric.ns_per_call:.3f} | {speedup:.2f}x |"
             )
-        lines.extend(["", "Run URLs:", ""])
-        for result in target_results:
-            label = f"{result.benchmark} run"
-            if result.run_url:
-                lines.append(f"- `{label}`: {result.run_url}")
         lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
