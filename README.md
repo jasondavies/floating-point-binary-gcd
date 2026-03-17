@@ -23,6 +23,8 @@ search tool, and the accompanying proof artifacts.
   Modal entrypoints for running the CUDA benchmarks remotely.
 - `run_modal_repeats.py`
   Helper script for repeating Modal benchmark runs and summarizing results.
+- `benchmarks.md`
+  Modal benchmark results for the current H100/B200 runs.
 
 ## Floating-point GCD variant
 
@@ -100,6 +102,8 @@ used only to drive the operands down into the exact `u53` regime, after which
 the hot loop stays in the fp64 kernel.
 
 ## Benchmark results
+
+Current Modal H100/B200 benchmark runs are collected in `benchmarks.md`.
 
 Benchmarks were run on RTX 4090.
 

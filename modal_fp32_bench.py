@@ -7,7 +7,7 @@ from pathlib import Path
 import modal
 
 APP_NAME = "fp-gcd-fp32-bench"
-CUDA_BASE_IMAGE = "nvidia/cuda:12.4.1-devel-ubuntu22.04"
+CUDA_BASE_IMAGE = os.environ.get("MODAL_CUDA_BASE_IMAGE", "nvidia/cuda:12.8.1-devel-ubuntu22.04")
 CUDA_ARCH = os.environ.get("MODAL_CUDA_ARCH", "sm_90")
 GPU_TYPE = os.environ.get("MODAL_GPU_TYPE", "H100!")
 REMOTE_WORKDIR = "/workspace"
