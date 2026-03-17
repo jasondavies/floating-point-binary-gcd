@@ -270,3 +270,9 @@ Notes:
   not proved exactness for that query.
 - The pruning rule is the formally verified strong bound in
   `strong_bound_proof.md` / `StrongBoundProof.lean`.
+
+## Acknowledgements
+
+- [AXLE - Axiom Lean Engine](https://axle.axiommath.ai/) for checking the Lean proof.
+- [GPT-5.4](https://openai.com/index/introducing-gpt-5-4/) for help with proof drafting, formalization, and code changes.
+- [Modal](https://modal.com/) for remote GPU benchmarking on H100 and B200.
