@@ -1,7 +1,8 @@
 # Benchmark Results
 
-T4/H100/B200 sections were generated from Modal runs on 2026-03-17 08:51 UTC.
-A100 exact-model sections were assembled from Modal runs on 2026-03-17, with missing cells filled by additional exact-model sampling runs.
+This checked-in snapshot was assembled from Modal runs on 2026-03-17.
+The benchmark harness is `run_modal_repeats.py`, with the A100 exact-model
+sections split by the exact GPU model returned by Modal.
 
 Run parameters:
 

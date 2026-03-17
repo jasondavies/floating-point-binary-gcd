@@ -1,278 +1,209 @@
 # floating-point-binary-gcd
 
-This repo contains the floating-point GCD experiments, the exact-threshold
-search tool, and the accompanying proof artifacts.
+This repository contains three related pieces of work:
 
-## Contents
+- CUDA implementations of a floating-point binary-GCD variant for exact `u24`
+  (`fp32`) and exact `u53` (`fp64`) inputs, plus `u32`/`u64` hybrid variants.
+- An exact reverse-search tool for worst-case step counts of the underlying
+  left-shift absolute-difference GCD dynamics.
+- English and Lean proof artifacts for the strong pruning bound used by that
+  search.
 
-- `exact_threshold_search.c`
-  Exact reverse search for threshold/max-step questions.
+## Repository layout
+
 - `gcd_fp32.c`
-  CPU prototype for the 24-bit fp32 inner loop.
+  CPU reference and validator for the exact `fp32` / `u24` loop.
 - `gcd_fp32.cu`
-  CUDA benchmark for 24-bit fp32, 32-bit Stein, and the 32-bit hybrid.
+  CUDA benchmark for `fp32_u24`, `stein_u24`, `fp32_u32`, and `stein_u32`.
 - `gcd_fp64.cu`
-  CUDA benchmark for 53-bit fp64, 64-bit Stein, and the 64-bit hybrid.
-- `strong_bound_proof.md`
-  English proof of the strong pruning bound used by the exact-threshold search.
-- `StrongBoundProof.lean`
-  Machine-checked Lean 4 formalization of the strong pruning bound.
-- `strong_bound_proof_prompt.md`
-  Original proof prompt and audit checklist for the strong-bound argument.
+  CUDA benchmark for `fp64_u53`, `stein_u53`, `fp64_u64`, and `stein_u64`.
 - `modal_fp32_bench.py`, `modal_fp64_bench.py`
-  Modal entrypoints for running the CUDA benchmarks remotely.
+  Modal entrypoints that build the CUDA binaries remotely and run one benchmark.
 - `run_modal_repeats.py`
-  Helper script for repeating Modal benchmark runs and summarizing results.
+  Repeats Modal runs across target GPUs and can regenerate
+  `benchmarks.md`.
 - `benchmarks.md`
-  Modal benchmark results for the current T4/H100/B200 runs.
+  Current checked-in benchmark snapshot from Modal runs on 2026-03-17.
+- `exact_threshold_search.c`
+  Exact reverse search for threshold, max-step, frontier, and Pareto queries
+  up to `k = 128`.
+- `table.txt`
+  Checked-in exact max-step table through `k = 128`.
+- `strong_bound_proof.md`
+  English proof of the strong pruning bound used by the search.
+- `StrongBoundProof.lean`
+  Lean 4 formalization of that strong bound.
+- `SteinBound.lean`
+  Separate Lean formalization of worst-case iteration bounds for Stein's
+  binary GCD.
+- `strong_bound_proof_prompt.md`
+  Original proof prompt and audit checklist.
+- `blog.md`
+  Article-style writeup of the algorithm and benchmark results.
 
-## Floating-point GCD variant
+## Algorithm summary
 
-The core idea is a GPU-oriented binary-GCD variant that uses fp32 bit
-manipulation to replace the usual integer left-shift alignment step.
+For exact `u24` inputs, both operands are represented as `fp32` values. Given
+`a <= b`, one loop iteration:
 
-For a pair `a <= b`, one iteration does:
+1. takes the mantissa of `a` and the exponent of `b`,
+2. forms the aligned value `t`,
+3. computes `r = |b - t|`,
+4. reorders `(a, r)` back to `(min(a, r), max(a, r))`.
 
-1. build `t` by combining the mantissa of `a_fp32` with the exponent of `b_fp32`
-2. compute `r = |b - t|`
-3. reorder `(a, r)` into `(min(a, r), max(a, r))`
+Because every `u24` value is exactly representable in `fp32`, this is still an
+exact integer GCD algorithm. On NVIDIA GPUs the hot loop lowers to one
+bit-select, one floating-point subtraction, and two `min/max` instructions.
 
-For 24-bit unsigned inputs, the values are represented exactly in fp32, so this
-is an exact integer algorithm despite using floating-point instructions.
+The larger-width variants are hybrids:
 
-### 24-bit core
+- `fp32_u32` strips common powers of two, runs `8` Stein frontend iterations,
+  then switches to the exact `u24` core.
+- `fp64_u64` does the same with `11` Stein frontend iterations before
+  switching to the exact `u53` core.
 
-The 24-bit core keeps both operands in fp32 and iterates:
+The exact-search tool studies the corresponding left-shift absolute-difference
+transition system and computes exact worst-case step counts inside the
+`k`-bit box.
 
-```text
-a_fp = min(a_in, b_in)
-b_fp = max(a_in, b_in)
-while (a_fp != 0) {
-    t_fp = splice_mantissa(a_fp, b_fp)
-    t_fp = abs(b_fp - t_fp)
-    b_fp = max(a_fp, t_fp)
-    a_fp = min(a_fp, t_fp)
-}
-return uint32(b_fp)
-```
+## Current benchmark snapshot
 
-The splice is implemented with a single inline-PTX `lop3.b32`, so the hot loop
-on RTX 4090 lowers to essentially:
+The current checked-in benchmark report is [benchmarks.md](benchmarks.md).
+These numbers come from Modal runs on 2026-03-17 with
+`count=1048576`, `rounds=1024`, `launches=20`, `block_size=256`,
+and `repeats=3`.
 
-```text
-LOP3.LUT   R2, R8, 0x7fffff, R7, ...
-FADD       R3, -R2, R7
-FMNMX      R7, |R3|, R8, !PT
-FMNMX      R8, |R3|, R8, PT
-```
+| GPU | `u24` speedup | `u32` speedup | `u53` speedup | `u64` speedup |
+| --- | ---: | ---: | ---: | ---: |
+| NVIDIA Tesla T4 | 1.33x | 1.24x | 0.13x | 0.17x |
+| NVIDIA A100-SXM4-80GB | 1.48x | 1.39x | 1.43x | 1.36x |
+| NVIDIA A100 80GB PCIe | 1.67x | 1.56x | 1.44x | 1.38x |
+| NVIDIA H100 80GB HBM3 | 1.71x | 1.50x | 1.58x | 1.40x |
+| NVIDIA B200 | 1.83x | 1.44x | 1.55x | 1.40x |
 
-That is:
+Takeaways:
 
-- `1` logic instruction to build the aligned operand
-- `1` floating-point subtract
-- `2` floating-point min/max instructions with the absolute-value modifier folded in
-
-So the effective fp32 inner loop is only four core instructions.
-
-### 32-bit hybrid
-
-A full-`uint32_t` hybrid variant is also included.
-
-The hybrid does:
-
-1. strip common powers of two as in Stein
-2. run a fixed `8` Stein-style frontend iterations
-3. switch to the 24-bit fp32 core for the remainder
-
-This extends the fp32 method beyond the exact 24-bit fp32 range while keeping
-most of the work in the fast 24-bit kernel.
-
-### 64-bit hybrid
-
-The fp64 benchmark also includes a full-`uint64_t` hybrid variant.
-
-The 64-bit hybrid does:
-
-1. strip common powers of two as in Stein
-2. run a fixed `11` Stein-style frontend iterations
-3. switch to the 53-bit fp64 core for the remainder
-
-This is the direct fp64 analogue of the 32-bit fp32 hybrid: the frontend is
-used only to drive the operands down into the exact `u53` regime, after which
-the hot loop stays in the fp64 kernel.
-
-## Benchmark results
-
-Current Modal T4/H100/B200 benchmark runs are collected in `benchmarks.md`.
-
-Benchmarks were run on RTX 4090.
-
-### Random 24-bit inputs
-
-```text
-fp32_u24:   121.798 ms
-stein_u24:  187.148 ms
-```
-
-So the fp32 variant is about `1.54x` faster than plain Stein on this workload.
-
-### Random 32-bit inputs
-
-With the fixed-8 hybrid frontend:
-
-```text
-fp32_u32:   180.731 ms
-stein_u32:  229.446 ms
-```
-
-So the hybrid remains about `1.27x` faster than plain 32-bit Stein on this
-random workload.
-
-### Behaviour on structured inputs
-
-The fp32 variant has a worse worst-case step count than Stein, so there are
-structured inputs where Stein wins. Conversely, there are also large odd inputs
-for which the 32-bit hybrid quickly drops into the 24-bit fp32 regime and is
-much faster than plain Stein.
-
-The practical result is therefore not that the floating-point variant dominates
-Stein in every regime, but that it gives substantially better bulk throughput on
-GPU for the tested random workloads.
+- `fp32_u24` and `fp32_u32` beat Stein on every GPU in the current snapshot.
+- `fp64_u53` and `fp64_u64` win on A100/H100/B200, but lose badly on T4.
+- The `fp64` variants are also expected to lose on consumer GeForce cards such
+  as RTX 3090 and RTX 4090 because of heavily rate-limited `fp64` throughput.
 
 ## Build
 
-CPU:
+CPU tools:
 
 ```sh
 cc -O3 -std=c11 -Wall -Wextra -Wpedantic gcd_fp32.c -lm -o gcd_fp32
 cc -O3 -std=c11 -Wall -Wextra -Wpedantic -pthread exact_threshold_search.c -o exact_threshold_search
 ```
 
-CUDA on RTX 4090 / Ada:
+CUDA benchmarks:
 
 ```sh
 nvcc -O3 -arch=sm_89 gcd_fp32.cu -o gcd_bench
-nvcc -O3 -arch=sm_89 gcd_fp64.cu -o gcd_bench_u53
-```
-
-CUDA on H100 / Hopper:
-
-```sh
 nvcc -O3 -arch=sm_90 gcd_fp64.cu -o gcd_bench_u53
 ```
 
-## Example runs
+Useful architecture flags from the checked-in Modal setup:
 
-24-bit benchmark:
+- `sm_75` for T4
+- `sm_80` for A100
+- `sm_90` for H100
+- `sm_100` for B200
+
+## Local examples
+
+Validate the CPU `u24` loop on one pair:
+
+```sh
+./gcd_fp32 25 18
+```
+
+Exhaustively check all pairs in a small box:
+
+```sh
+./gcd_fp32 --scan 255
+```
+
+Run the CUDA benchmark locally after building:
 
 ```sh
 ./gcd_bench both_u24
-```
-
-32-bit benchmark:
-
-```sh
 ./gcd_bench both_u32
-```
-
-53-bit benchmark:
-
-```sh
 ./gcd_bench_u53 both_u53
-```
-
-64-bit benchmark:
-
-```sh
 ./gcd_bench_u53 both_u64
 ```
 
-53-bit benchmark on Modal H100:
+Generate exact worst-case data for `k = 1..8`:
+
+```sh
+./exact_threshold_search table 8 4 1 1000000
+```
+
+Inspect the reverse frontier at a fixed depth:
+
+```sh
+./exact_threshold_search frontier 8 3
+```
+
+Notes for `exact_threshold_search`:
+
+- `frontier`, `search`, `parallel`, `max`, `table`, `pareto`, and
+  `pareto_table` are the supported modes.
+- `max`, `parallel`, `pareto`, and larger `table` runs are exhaustive searches
+  and can run for a long time even with pruning.
+- `visit_limit_hit=1` means the run did not finish exactly within the chosen
+  search budget.
+- `table.txt` is the checked-in output table through `k = 128`.
+
+## Modal benchmarking
+
+Install and configure Modal first:
 
 ```sh
 python3 -m pip install modal
 python3 -m modal setup
-python3 -m modal run modal_fp64_bench.py
 ```
 
-The Modal entrypoint compiles `gcd_fp64.cu` for Hopper with `-arch=sm_90`,
-requests `gpu="H100!"`, and then runs `gcd_bench_u53 both_u53` with the same
-default parameters as the local binary. The `!` matters for benchmarking:
-Modal's current GPU docs say plain `"H100"` may be automatically upgraded to an
-H200, while `"H100!"` keeps the request pinned to H100.
-
-You can override the benchmark parameters from the CLI, for example:
+Run a single benchmark directly:
 
 ```sh
-python3 -m modal run modal_fp64_bench.py --mode fp64_u53 --count 1048576 --rounds 2048 --launches 40 --block-size 256
+python3 -m modal run modal_fp32_bench.py --mode both_u32
+python3 -m modal run modal_fp64_bench.py --mode both_u53
 ```
 
-Or run the 64-bit hybrid on full `uint64_t` inputs:
+The Modal entrypoints respect these environment variables:
+
+- `MODAL_GPU_TYPE`
+- `MODAL_CUDA_ARCH`
+- `MODAL_CUDA_BASE_IMAGE`
+
+For example, to pin an H100 run:
 
 ```sh
-python3 -m modal run modal_fp64_bench.py --mode both_u64 --count 1048576 --rounds 1024 --launches 20 --block-size 256
+MODAL_GPU_TYPE=H100! MODAL_CUDA_ARCH=sm_90 python3 -m modal run modal_fp64_bench.py --mode both_u53
 ```
 
-To benchmark a single fixed pair across the whole launch:
+To regenerate the benchmark markdown from repeated runs:
 
 ```sh
-python3 -m modal run modal_fp64_bench.py --use-fixed-pair --fixed-a 9007199254740991 --fixed-b 4503599627370495
+python3 run_modal_repeats.py \
+  --python python3 \
+  --targets t4 a100 h100 b200 \
+  --repeats 3 \
+  --markdown-out benchmarks.md
 ```
 
-Exact threshold search:
+## Proof and search artifacts
 
-```sh
-./exact_threshold_search parallel 53 86 0 1 5000000
-```
-
-The exact-threshold search now uses `__uint128_t` internally for states, so it
-supports `k` up to `128` and prints witnesses in decimal.
-
-The search works on the reduced reverse graph starting from the root state
-`(1,0)`. A state `(a,b)` at reverse depth `d` corresponds to an input that
-needs exactly `d` forward steps to reach the root.
-
-Available modes:
-
-- `frontier <k> <depth>`
-  Enumerate the reduced states exactly at reverse depth `depth` inside the
-  `k`-bit box. This is mostly a debugging/helper mode and is also the frontier
-  used by the parallel search modes.
-- `search <k> <target-depth> [visit-limit] [progress-interval] [start-a start-b start-depth]`
-  Run a single-threaded reverse search asking whether some reduced `k`-bit
-  input exists that needs at least `target-depth` steps. If one is found, the
-  tool prints `found=1` and a witness. The optional start triple lets you resume
-  from a known reverse node instead of the root.
-- `parallel <k> <target-depth> <frontier-depth> [threads] [visit-limit]`
-  Split the search by first building the reverse frontier at `frontier-depth`,
-  then search each shard in parallel. This is the main mode for threshold
-  questions at larger `k`.
-- `max <k> <frontier-depth> [threads] [visit-limit]`
-  Compute the exact maximum step count for `k`-bit inputs, if the search
-  completes within the visit budget. Internally this binary-searches the target
-  depth and uses the threshold search as a subroutine.
-- `table <n> <frontier-depth> [threads] [visit-limit]`
-  Run `max` for every `k = 1..n` and print a table of exact worst-case step
-  counts and witnesses.
-- `pareto <k> <frontier-depth> [threads] [visit-limit]`
-  First compute the exact maximum step count for the given `k`, then enumerate
-  the Pareto-minimal witnesses achieving that maximum.
-- `pareto_table <n> <frontier-depth> [threads] [visit-limit]`
-  Run `pareto` for every `k = 1..n`.
-
-Notes:
-
-- `frontier-depth` is a performance knob, not a semantic parameter. Larger
-  values create more independent shards for parallel work, but also make the
-  frontier itself more expensive to build and store.
-- `visit_limit_hit=1` means the result is incomplete because the search budget
-  was exhausted. In that case `max`, `table`, `pareto`, and `pareto_table` have
-  not proved exactness for that query.
-- The pruning rule is the formally verified strong bound in
-  `strong_bound_proof.md` / `StrongBoundProof.lean`.
+- [strong_bound_proof.md](strong_bound_proof.md) gives the English proof of the strong admissible pruning bound.
+- [StrongBoundProof.lean](StrongBoundProof.lean) is the machine-checked Lean version of that argument.
+- [SteinBound.lean](SteinBound.lean) formalizes worst-case bounds for bundled Stein reductions.
+- [strong_bound_proof_prompt.md](strong_bound_proof_prompt.md) preserves the original proof prompt and audit checklist.
+- [table.txt](table.txt) records the current exact max-step table through `k = 128`.
 
 ## Acknowledgements
 
 - [AXLE - Axiom Lean Engine](https://axle.axiommath.ai/) for checking the Lean proof.
-- [GPT-5.4](https://openai.com/index/introducing-gpt-5-4/) for help with proof drafting, formalization, and code changes.
-- [Modal](https://modal.com/) for remote GPU benchmarking on H100 and B200.
+- [GPT-5.4](https://openai.com/index/introducing-gpt-5-4/) for proof drafting, formalization, and code changes.
+- [Modal](https://modal.com/) for remote GPU benchmarking.
