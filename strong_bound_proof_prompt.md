@@ -1,5 +1,8 @@
 # Strong-Bound Admissibility Proof Task
 
+This file is the original proof prompt and audit checklist that led to the
+completed writeups in `strong_bound_proof.md` and `StrongBoundProof.lean`.
+
 I want a rigorous mathematical proof, not code, for the admissibility of a
 pruning bound used in an exact reverse search for a modified binary-GCD-like
 algorithm.
@@ -53,10 +56,11 @@ Equivalently:
 - `min_drop_for_steps_strong(5) = 3`
 - and then periodic with slope `3/5`.
 
-The admissibility statement is:
+The target admissibility statement is:
 
-> For every forward continuation of `s` more steps from any state, the top
-> bit-length drops by at least `min_drop_for_steps_strong(s)`.
+> For every valid forward continuation of `s` more steps through reduced
+> states, the top bit-length drops by at least
+> `min_drop_for_steps_strong(s)`.
 
 If true, then the reverse search can safely prune whenever the remaining
 bit-length budget `delta` is too small to support the requested remaining
@@ -145,6 +149,11 @@ then
 
 So it is enough to prove lower bounds on bit-length drop for the unreduced
 algebra.
+
+This is a valid monotonicity observation, but it is not by itself enough to
+justify exact-drop statements such as Lemma B. The completed proof instead uses
+the stronger reduced-state fact that on valid reduced trajectories the
+unreduced output is already coprime, so normalization is the identity.
 
 ### Lemma B: exact drop in an alternating block
 
@@ -280,9 +289,13 @@ Either way contradiction.
 Therefore all three cases are impossible, so `0, 1, 0, 1, 0` cannot occur.
 By Lemma B, every alternating block drops at least `3` bits.
 Hence every 5-step block drops at least `3` bits.
-Hence the strong bound is admissible.
 
-## What I want from you
+To conclude admissibility for reverse search, one must compare a hypothetical
+forward trajectory from an in-box ancestor to the current reverse node. That
+final ancestor-to-current formulation is written out in `strong_bound_proof.md`
+and formalized in `StrongBoundProof.lean`.
+
+## Original request
 
 Please do one of the following:
 
@@ -301,6 +314,9 @@ Please focus especially on:
   `min_drop_for_steps_strong` is complete
 
 ## Computational evidence
+
+This evidence predates the completed proof and is retained only as historical
+motivation. It is not part of the final argument.
 
 An exact bounded verifier on the finite reachable reduced reverse graph found:
 
