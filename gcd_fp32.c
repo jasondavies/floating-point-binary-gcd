@@ -101,7 +101,7 @@ static fp32_run gcd_u24_fp32_proposed(uint32_t a, uint32_t b, uint32_t step_limi
         swap_f32(&a_fp, &b_fp);
     }
 
-    while (a_fp != 0.0f && b_fp != 0.0f) {
+    while (a_fp != 0.0f) {
         float t_fp = fp32_repack_mantissa_with_exponent(a_fp, b_fp);
 
         b_fp -= t_fp;
@@ -123,7 +123,7 @@ static fp32_run gcd_u24_fp32_proposed(uint32_t a, uint32_t b, uint32_t step_limi
     out.a_fp = a_fp;
     out.b_fp = b_fp;
 
-    if (!u24_exact_in_float((a_fp != 0.0f) ? a_fp : b_fp, &out.gcd)) {
+    if (!u24_exact_in_float(b_fp, &out.gcd)) {
         out.status = FP32_RUN_NOT_INTEGER;
         return out;
     }

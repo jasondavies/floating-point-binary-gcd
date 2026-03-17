@@ -41,7 +41,7 @@ while (a_fp != 0) {
     b_fp = max(a_fp, t_fp)
     a_fp = min(a_fp, t_fp)
 }
-return uint32(max(a_fp, b_fp))
+return uint32(b_fp)
 ```
 
 The splice is implemented with a single inline-PTX `lop3.b32`, so the hot loop

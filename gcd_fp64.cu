@@ -182,7 +182,7 @@ __device__ __forceinline__ uint64_t gcd_fp64_u53(double a_in, double b_in) {
         a_fp = fmin(a_fp, t_fp);
     }
 
-    return __double2ull_rn(fmax(a_fp, b_fp));
+    return __double2ull_rn(b_fp);
 }
 
 __device__ __forceinline__ uint64_t gcd_stein_u64(uint64_t u, uint64_t v) {

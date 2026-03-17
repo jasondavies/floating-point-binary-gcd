@@ -42,7 +42,7 @@ __device__ __forceinline__ uint32_t gcd_fp32_u24(float a_in, float b_in) {
         a_fp = fminf(a_fp, t_fp);
     }
 
-    return __float2uint_rn(fmaxf(a_fp, b_fp));
+    return __float2uint_rn(b_fp);
 }
 
 __device__ __forceinline__ uint32_t gcd_stein_u32(uint32_t u, uint32_t v) {
