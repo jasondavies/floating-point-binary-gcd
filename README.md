@@ -1,7 +1,7 @@
-# fp-gcd
+# floating-point-binary-gcd
 
-This repo contains the extracted floating-point GCD experiments and the exact
-threshold search tool from the original `gcd` workspace.
+This repo contains the floating-point GCD experiments, the exact-threshold
+search tool, and the accompanying proof artifacts.
 
 ## Contents
 
@@ -13,6 +13,16 @@ threshold search tool from the original `gcd` workspace.
   CUDA benchmark for 24-bit fp32, 32-bit Stein, and the 32-bit hybrid.
 - `gcd_fp64.cu`
   CUDA benchmark for 53-bit fp64, 64-bit Stein, and the 64-bit hybrid.
+- `strong_bound_proof.md`
+  English proof of the strong pruning bound used by the exact-threshold search.
+- `StrongBoundProof.lean`
+  Machine-checked Lean 4 formalization of the strong pruning bound.
+- `strong_bound_proof_prompt.md`
+  Original proof prompt and audit checklist for the strong-bound argument.
+- `modal_fp32_bench.py`, `modal_fp64_bench.py`
+  Modal entrypoints for running the CUDA benchmarks remotely.
+- `run_modal_repeats.py`
+  Helper script for repeating Modal benchmark runs and summarizing results.
 
 ## Floating-point GCD variant
 
