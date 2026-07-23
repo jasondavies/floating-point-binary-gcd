@@ -6,7 +6,9 @@
 #include <cuda_runtime.h>
 
 #define U24_MASK 0x00ffffffu
-#define HYBRID_STEIN_FRONTEND_ITERS 8
+// For odd 32-bit operands, each bundled Stein reduction at least halves their
+// sum. Nine reductions make the sum < 2^24, so both operands are exact in fp32.
+#define HYBRID_STEIN_FRONTEND_ITERS 9u
 
 #define CUDA_CHECK(call)                                                          \
     do {                                                                          \

@@ -1,8 +1,10 @@
 # Benchmark Results
 
-This checked-in snapshot was assembled from Modal runs on 2026-03-17.
+This checked-in snapshot combines direct `u24` and `u53` Modal runs from
+2026-03-17 with corrected `u32` and `u64` hybrid runs from 2026-07-24.
 The benchmark harness is `run_modal_repeats.py`, with the A100 exact-model
-sections split by the exact GPU model returned by Modal.
+sections split by the exact GPU model returned by Modal. The incomplete A100
+SXM series is omitted.
 
 Run parameters:
 
@@ -30,25 +32,9 @@ Target configuration:
 | workload | fp/hybrid ns/call | Stein ns/call | speedup vs Stein |
 | --- | ---: | ---: | ---: |
 | Random 24-bit inputs | 0.036 | 0.048 | 1.33x |
-| Random 32-bit inputs | 0.050 | 0.062 | 1.24x |
+| Random 32-bit inputs | 0.050 | 0.061 | 1.22x |
 | Random 53-bit inputs | 1.877 | 0.245 | 0.13x |
-| Random 64-bit inputs | 1.751 | 0.297 | 0.17x |
-
-## NVIDIA A100-SXM4-80GB
-
-- Modal request: `A100-80GB`
-- CUDA arch: `sm_80`
-- CUDA base image: `nvidia/cuda:12.8.1-devel-ubuntu22.04`
-- Driver: `580.95.05`
-- Reported memory: `81920 MiB`
-- Note: target `a100` returned multiple exact GPU models; this section uses only runs from this model.
-
-| workload | fp/hybrid ns/call | Stein ns/call | speedup vs Stein |
-| --- | ---: | ---: | ---: |
-| Random 24-bit inputs | 0.013 | 0.020 | 1.48x |
-| Random 32-bit inputs | 0.018 | 0.025 | 1.39x |
-| Random 53-bit inputs | 0.067 | 0.095 | 1.43x |
-| Random 64-bit inputs | 0.083 | 0.113 | 1.36x |
+| Random 64-bit inputs | 1.710 | 0.310 | 0.18x |
 
 ## NVIDIA A100 80GB PCIe
 

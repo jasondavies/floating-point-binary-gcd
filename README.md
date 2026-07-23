@@ -57,9 +57,9 @@ bit-select, one floating-point subtraction, and two `min/max` instructions.
 
 The larger-width variants are hybrids:
 
-- `fp32_u32` strips common powers of two, runs `8` Stein frontend iterations,
+- `fp32_u32` strips common powers of two, runs `9` Stein frontend iterations,
   then switches to the exact `u24` core.
-- `fp64_u64` does the same with `11` Stein frontend iterations before
+- `fp64_u64` does the same with `12` Stein frontend iterations before
   switching to the exact `u53` core.
 
 The exact-search tool studies the corresponding left-shift absolute-difference
@@ -69,24 +69,27 @@ transition system and computes exact worst-case step counts inside the
 ## Current benchmark snapshot
 
 The current checked-in benchmark report is [benchmarks.md](benchmarks.md).
-These numbers come from Modal runs on 2026-03-17 with
-`count=1048576`, `rounds=1024`, `launches=20`, `block_size=256`,
-and `repeats=3`.
+The direct `u24` and `u53` rows come from Modal runs on 2026-03-17; the
+corrected `u32` and `u64` hybrid rows were run on 2026-07-24. All runs used
+`count=1048576`, `rounds=1024`, `launches=20`, `block_size=256`, and
+`repeats=3` per requested GPU target.
 
 | GPU | `u24` speedup | `u32` speedup | `u53` speedup | `u64` speedup |
 | --- | ---: | ---: | ---: | ---: |
-| NVIDIA Tesla T4 | 1.33x | 1.24x | 0.13x | 0.17x |
-| NVIDIA A100-SXM4-80GB | 1.48x | 1.39x | 1.43x | 1.36x |
+| NVIDIA Tesla T4 | 1.33x | 1.22x | 0.13x | 0.18x |
 | NVIDIA A100 80GB PCIe | 1.67x | 1.56x | 1.44x | 1.38x |
 | NVIDIA H100 80GB HBM3 | 1.71x | 1.50x | 1.58x | 1.40x |
 | NVIDIA B200 | 1.83x | 1.44x | 1.55x | 1.40x |
 
 Takeaways:
 
-- `fp32_u24` and `fp32_u32` beat Stein on every GPU in the current snapshot.
-- `fp64_u53` and `fp64_u64` win on A100/H100/B200, but lose badly on T4.
-- The `fp64` variants are also expected to lose on consumer GeForce cards such
-  as RTX 3090 and RTX 4090 because of heavily rate-limited `fp64` throughput.
+- `fp32_u24` beats Stein on every GPU in the current snapshot.
+- `fp64_u53` wins on A100/H100/B200, but loses badly on T4.
+- The corrected hybrids beat Stein on A100/H100/B200; `fp32_u32` also wins on
+  T4, while `fp64_u64` loses there because of T4's limited `fp64` throughput.
+- The direct `fp64_u53` variant is also expected to lose on consumer GeForce
+  cards such as RTX 3090 and RTX 4090 because of heavily rate-limited `fp64`
+  throughput.
 
 ## Build
 

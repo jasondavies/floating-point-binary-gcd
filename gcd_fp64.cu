@@ -8,7 +8,9 @@
 #include <cuda_runtime.h>
 
 #define U53_MASK ((1ull << 53) - 1ull)
-#define HYBRID_STEIN_FRONTEND_ITERS_U64 11u
+// For odd 64-bit operands, each bundled Stein reduction at least halves their
+// sum. Twelve reductions make the sum < 2^53, so both operands are exact in fp64.
+#define HYBRID_STEIN_FRONTEND_ITERS_U64 12u
 
 #define CUDA_CHECK(call)                                                          \
     do {                                                                          \
