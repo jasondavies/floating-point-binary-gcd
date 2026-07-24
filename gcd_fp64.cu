@@ -11,6 +11,7 @@
 // For odd 64-bit operands, each bundled Stein reduction at least halves their
 // sum. Twelve reductions make the sum < 2^53, so both operands are exact in fp64.
 #define HYBRID_STEIN_FRONTEND_ITERS_U64 12u
+#define VALIDATION_BLOCK_SIZE 256u
 
 #define CUDA_CHECK(call)                                                          \
     do {                                                                          \
@@ -347,6 +348,174 @@ extern "C" __global__ void gcd_stein_u64_kernel(const uint64_t *a,
     out[idx] = acc;
 }
 
+static uint64_t gcd_host_reference(uint64_t a, uint64_t b) {
+    while (b != 0ull) {
+        uint64_t remainder = a % b;
+        a = b;
+        b = remainder;
+    }
+    return a;
+}
+
+static int check_validation_output(const char *implementation,
+                                   const uint64_t *h_a,
+                                   const uint64_t *h_b,
+                                   const uint64_t *h_out,
+                                   uint32_t count) {
+    for (uint32_t i = 0; i < count; ++i) {
+        uint64_t expected = gcd_host_reference(h_a[i], h_b[i]);
+        if (h_out[i] != expected) {
+            fprintf(stderr,
+                    "validation mismatch: implementation=%s index=%u "
+                    "input=%" PRIu64 ",%" PRIu64 " expected=%" PRIu64
+                    " actual=%" PRIu64 "\n",
+                    implementation,
+                    i,
+                    h_a[i],
+                    h_b[i],
+                    expected,
+                    h_out[i]);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int validate_dataset(int use_u64,
+                            const uint64_t *h_a,
+                            const uint64_t *h_b,
+                            const uint64_t *d_a,
+                            const uint64_t *d_b,
+                            uint64_t *d_out,
+                            uint64_t *h_out,
+                            uint32_t count) {
+    const uint32_t grid_size =
+        (count + VALIDATION_BLOCK_SIZE - 1u) / VALIDATION_BLOCK_SIZE;
+    const char *fp_name = use_u64 ? "fp64_u64" : "fp64_u53";
+    const char *stein_name = use_u64 ? "stein_u64" : "stein_u53";
+
+    if (use_u64) {
+        gcd_fp64_u64_kernel<<<grid_size, VALIDATION_BLOCK_SIZE>>>(
+            d_a, d_b, d_out, count, 1u, 1);
+    } else {
+        gcd_fp64_u53_kernel<<<grid_size, VALIDATION_BLOCK_SIZE>>>(
+            d_a, d_b, d_out, count, 1u, 1);
+    }
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaMemcpy(
+        h_out, d_out, (size_t)count * sizeof(uint64_t), cudaMemcpyDeviceToHost));
+    if (check_validation_output(fp_name, h_a, h_b, h_out, count) != 0) {
+        return 1;
+    }
+
+    if (use_u64) {
+        gcd_stein_u64_kernel<<<grid_size, VALIDATION_BLOCK_SIZE>>>(
+            d_a, d_b, d_out, count, 1u, 1);
+    } else {
+        gcd_stein_u53_kernel<<<grid_size, VALIDATION_BLOCK_SIZE>>>(
+            d_a, d_b, d_out, count, 1u, 1);
+    }
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaMemcpy(
+        h_out, d_out, (size_t)count * sizeof(uint64_t), cudaMemcpyDeviceToHost));
+    return check_validation_output(stein_name, h_a, h_b, h_out, count);
+}
+
+static int validate_implementations(int use_u64,
+                                    const uint64_t *h_a,
+                                    const uint64_t *h_b,
+                                    const uint64_t *d_a,
+                                    const uint64_t *d_b,
+                                    uint64_t *d_out,
+                                    uint64_t *h_out,
+                                    uint32_t count) {
+    static const uint64_t u53_a[] = {
+        0ull, 0ull, 1ull, 25ull, U53_MASK, U53_MASK, 1ull << 52,
+        1ull << 52, U53_MASK - 2ull, (1ull << 52) + 1ull,
+    };
+    static const uint64_t u53_b[] = {
+        0ull, U53_MASK, U53_MASK, 18ull, U53_MASK - 2ull, 1ull,
+        1ull << 51, (1ull << 52) - 1ull, 3ull, (1ull << 51) + 1ull,
+    };
+    static const uint64_t u64_a[] = {
+        0ull,
+        0ull,
+        1ull,
+        25ull,
+        UINT64_MAX,
+        UINT64_MAX,
+        1ull << 63,
+        1ull << 53,
+        UINT64_C(17170434652806850245),
+        UINT64_C(17000554516544968789),
+        UINT64_C(0x8000000000000000),
+        UINT64_C(0xfffffffffffffffe),
+    };
+    static const uint64_t u64_b[] = {
+        0ull,
+        UINT64_MAX,
+        UINT64_MAX,
+        18ull,
+        UINT64_MAX - 2ull,
+        1ull,
+        1ull << 62,
+        (1ull << 53) + 1ull,
+        UINT64_C(11127183001224483315),
+        UINT64_C(15683058166996929849),
+        UINT64_C(0x4000000000000000),
+        UINT64_C(0x7ffffffffffffffe),
+    };
+    const uint64_t *regression_a = use_u64 ? u64_a : u53_a;
+    const uint64_t *regression_b = use_u64 ? u64_b : u53_b;
+    const uint32_t regression_count =
+        use_u64 ? (uint32_t)(sizeof(u64_a) / sizeof(u64_a[0]))
+                : (uint32_t)(sizeof(u53_a) / sizeof(u53_a[0]));
+    uint64_t regression_out[sizeof(u64_a) / sizeof(u64_a[0])];
+    uint64_t *d_regression_a = NULL;
+    uint64_t *d_regression_b = NULL;
+    uint64_t *d_regression_out = NULL;
+
+    if (validate_dataset(
+            use_u64, h_a, h_b, d_a, d_b, d_out, h_out, count) != 0) {
+        return 1;
+    }
+
+    CUDA_CHECK(cudaMalloc(
+        &d_regression_a, (size_t)regression_count * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(
+        &d_regression_b, (size_t)regression_count * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(
+        &d_regression_out, (size_t)regression_count * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMemcpy(d_regression_a,
+                          regression_a,
+                          (size_t)regression_count * sizeof(uint64_t),
+                          cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_regression_b,
+                          regression_b,
+                          (size_t)regression_count * sizeof(uint64_t),
+                          cudaMemcpyHostToDevice));
+
+    if (validate_dataset(use_u64,
+                         regression_a,
+                         regression_b,
+                         d_regression_a,
+                         d_regression_b,
+                         d_regression_out,
+                         regression_out,
+                         regression_count) != 0) {
+        return 1;
+    }
+
+    CUDA_CHECK(cudaFree(d_regression_a));
+    CUDA_CHECK(cudaFree(d_regression_b));
+    CUDA_CHECK(cudaFree(d_regression_out));
+    printf("validation=ok workload=%s inputs=%u regression_cases=%u\n",
+           use_u64 ? "u64" : "u53",
+           count,
+           regression_count);
+    return 0;
+}
+
 static int run_benchmark(const char *name,
                          int use_fp64,
                          int use_u64,
@@ -464,6 +633,11 @@ int main(int argc, char **argv) {
         printf(" fixed_pair=%" PRIu64 ",%" PRIu64, fixed_a, fixed_b);
     }
     putchar('\n');
+
+    if (validate_implementations(
+            use_u64, h_a, h_b, d_a, d_b, d_out, h_out, count) != 0) {
+        return 1;
+    }
 
     if (mode_runs_fp64(mode) &&
         run_benchmark(use_u64 ? "fp64_u64" : "fp64_u53",

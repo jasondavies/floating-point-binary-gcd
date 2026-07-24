@@ -135,6 +135,9 @@ Run the CUDA benchmark locally after building:
 ./gcd_bench_u53 both_u64
 ```
 
+Before timing, each CUDA executable validates both implementations against an
+independent host GCD on the benchmark inputs and explicit regression cases.
+
 Generate exact worst-case data for `k = 1..8`:
 
 ```sh

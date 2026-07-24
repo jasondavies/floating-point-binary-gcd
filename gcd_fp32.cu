@@ -9,6 +9,7 @@
 // For odd 32-bit operands, each bundled Stein reduction at least halves their
 // sum. Nine reductions make the sum < 2^24, so both operands are exact in fp32.
 #define HYBRID_STEIN_FRONTEND_ITERS 9u
+#define VALIDATION_BLOCK_SIZE 256u
 
 #define CUDA_CHECK(call)                                                          \
     do {                                                                          \
@@ -213,6 +214,154 @@ extern "C" __global__ void gcd_stein_u32_kernel(const uint32_t *a,
     }
 
     out[idx] = acc;
+}
+
+static uint32_t gcd_host_reference(uint32_t a, uint32_t b) {
+    while (b != 0u) {
+        uint32_t remainder = a % b;
+        a = b;
+        b = remainder;
+    }
+    return a;
+}
+
+static int check_validation_output(const char *implementation,
+                                   const uint32_t *h_a,
+                                   const uint32_t *h_b,
+                                   const uint32_t *h_out,
+                                   uint32_t count) {
+    for (uint32_t i = 0; i < count; ++i) {
+        uint32_t expected = gcd_host_reference(h_a[i], h_b[i]);
+        if (h_out[i] != expected) {
+            fprintf(stderr,
+                    "validation mismatch: implementation=%s index=%u "
+                    "input=%u,%u expected=%u actual=%u\n",
+                    implementation,
+                    i,
+                    h_a[i],
+                    h_b[i],
+                    expected,
+                    h_out[i]);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int validate_dataset(int use_u32,
+                            const uint32_t *h_a,
+                            const uint32_t *h_b,
+                            const uint32_t *d_a,
+                            const uint32_t *d_b,
+                            uint32_t *d_out,
+                            uint32_t *h_out,
+                            uint32_t count) {
+    const uint32_t grid_size =
+        (count + VALIDATION_BLOCK_SIZE - 1u) / VALIDATION_BLOCK_SIZE;
+    const char *fp_name = use_u32 ? "fp32_u32" : "fp32_u24";
+    const char *stein_name = use_u32 ? "stein_u32" : "stein_u24";
+
+    if (use_u32) {
+        gcd_fp32_u32_kernel<<<grid_size, VALIDATION_BLOCK_SIZE>>>(
+            d_a, d_b, d_out, count, 1u, 1);
+    } else {
+        gcd_fp32_u24_kernel<<<grid_size, VALIDATION_BLOCK_SIZE>>>(
+            d_a, d_b, d_out, count, 1u, 1);
+    }
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaMemcpy(
+        h_out, d_out, (size_t)count * sizeof(uint32_t), cudaMemcpyDeviceToHost));
+    if (check_validation_output(fp_name, h_a, h_b, h_out, count) != 0) {
+        return 1;
+    }
+
+    if (use_u32) {
+        gcd_stein_u32_kernel<<<grid_size, VALIDATION_BLOCK_SIZE>>>(
+            d_a, d_b, d_out, count, 1u, 1);
+    } else {
+        gcd_stein_u24_kernel<<<grid_size, VALIDATION_BLOCK_SIZE>>>(
+            d_a, d_b, d_out, count, 1u, 1);
+    }
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaMemcpy(
+        h_out, d_out, (size_t)count * sizeof(uint32_t), cudaMemcpyDeviceToHost));
+    return check_validation_output(stein_name, h_a, h_b, h_out, count);
+}
+
+static int validate_implementations(int use_u32,
+                                    const uint32_t *h_a,
+                                    const uint32_t *h_b,
+                                    const uint32_t *d_a,
+                                    const uint32_t *d_b,
+                                    uint32_t *d_out,
+                                    uint32_t *h_out,
+                                    uint32_t count) {
+    static const uint32_t u24_a[] = {
+        0u, 0u, 1u, 25u, U24_MASK, U24_MASK, 1u << 23, 1u << 23,
+        0x00fffffdu, 0x00800001u,
+    };
+    static const uint32_t u24_b[] = {
+        0u, U24_MASK, U24_MASK, 18u, U24_MASK - 2u, 1u, 1u << 22,
+        (1u << 23) - 1u, 3u, 0x007fffffu,
+    };
+    static const uint32_t u32_a[] = {
+        0u, 0u, 1u, 25u, UINT32_MAX, UINT32_MAX, 1u << 31, 1u << 24,
+        3937952157u, 4026625921u, 0x80000000u, 0xfffffffeu,
+    };
+    static const uint32_t u32_b[] = {
+        0u, UINT32_MAX, UINT32_MAX, 18u, UINT32_MAX - 2u, 1u, 1u << 30,
+        (1u << 24) + 1u, 3591134307u, 2667281535u, 0x40000000u,
+        0x7ffffffeu,
+    };
+    const uint32_t *regression_a = use_u32 ? u32_a : u24_a;
+    const uint32_t *regression_b = use_u32 ? u32_b : u24_b;
+    const uint32_t regression_count =
+        use_u32 ? (uint32_t)(sizeof(u32_a) / sizeof(u32_a[0]))
+                : (uint32_t)(sizeof(u24_a) / sizeof(u24_a[0]));
+    uint32_t regression_out[sizeof(u32_a) / sizeof(u32_a[0])];
+    uint32_t *d_regression_a = NULL;
+    uint32_t *d_regression_b = NULL;
+    uint32_t *d_regression_out = NULL;
+
+    if (validate_dataset(
+            use_u32, h_a, h_b, d_a, d_b, d_out, h_out, count) != 0) {
+        return 1;
+    }
+
+    CUDA_CHECK(cudaMalloc(
+        &d_regression_a, (size_t)regression_count * sizeof(uint32_t)));
+    CUDA_CHECK(cudaMalloc(
+        &d_regression_b, (size_t)regression_count * sizeof(uint32_t)));
+    CUDA_CHECK(cudaMalloc(
+        &d_regression_out, (size_t)regression_count * sizeof(uint32_t)));
+    CUDA_CHECK(cudaMemcpy(d_regression_a,
+                          regression_a,
+                          (size_t)regression_count * sizeof(uint32_t),
+                          cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_regression_b,
+                          regression_b,
+                          (size_t)regression_count * sizeof(uint32_t),
+                          cudaMemcpyHostToDevice));
+
+    if (validate_dataset(use_u32,
+                         regression_a,
+                         regression_b,
+                         d_regression_a,
+                         d_regression_b,
+                         d_regression_out,
+                         regression_out,
+                         regression_count) != 0) {
+        return 1;
+    }
+
+    CUDA_CHECK(cudaFree(d_regression_a));
+    CUDA_CHECK(cudaFree(d_regression_b));
+    CUDA_CHECK(cudaFree(d_regression_out));
+    printf("validation=ok workload=%s inputs=%u regression_cases=%u\n",
+           use_u32 ? "u32" : "u24",
+           count,
+           regression_count);
+    return 0;
 }
 
 static uint32_t parse_u32_or_default(const char *text, uint32_t fallback) {
@@ -439,6 +588,11 @@ int main(int argc, char **argv) {
         printf(" fixed_pair=%u,%u", fixed_a, fixed_b);
     }
     putchar('\n');
+
+    if (validate_implementations(
+            use_u32, h_a, h_b, d_a, d_b, d_out, h_out, count) != 0) {
+        return 1;
+    }
 
     if (mode_runs_fp32(mode) &&
         run_benchmark(use_u32 ? "fp32_u32" : "fp32_u24",

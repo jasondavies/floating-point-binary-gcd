@@ -173,10 +173,14 @@ def parse_result(
     gpu_driver = None
     run_url = ""
     metrics: list[Metric] = []
+    validation_ok = False
 
     for line in text.splitlines():
         line = line.strip()
         if not line:
+            continue
+        if line.startswith("validation=ok"):
+            validation_ok = True
             continue
         if line.startswith("gpu="):
             gpu = line[len("gpu=") :]
@@ -210,6 +214,22 @@ def parse_result(
         raise RuntimeError(f"failed to parse GPU details from output for {benchmark}\n{text}")
     if not metrics:
         raise RuntimeError(f"failed to parse metrics from output for {benchmark}\n{text}")
+    if not validation_ok:
+        raise RuntimeError(f"benchmark validation did not run for {benchmark}\n{text}")
+
+    if mode == "both" or mode.startswith("both_"):
+        fp_metrics = [metric for metric in metrics if not metric.name.startswith("stein_")]
+        stein_metrics = [metric for metric in metrics if metric.name.startswith("stein_")]
+        if len(fp_metrics) != 1 or len(stein_metrics) != 1:
+            raise RuntimeError(
+                f"expected one FP/hybrid and one Stein metric for {benchmark}\n{text}"
+            )
+        if int(fp_metrics[0].checksum, 16) != int(stein_metrics[0].checksum, 16):
+            raise RuntimeError(
+                f"timed checksum mismatch for {benchmark}: "
+                f"{fp_metrics[0].name}={fp_metrics[0].checksum} "
+                f"{stein_metrics[0].name}={stein_metrics[0].checksum}\n{text}"
+            )
 
     return RunResult(
         benchmark=benchmark,
