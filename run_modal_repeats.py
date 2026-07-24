@@ -93,6 +93,8 @@ TARGETS = {
     ),
 }
 
+DEFAULT_TARGETS = ["h100", "b200"]
+
 WORKLOAD_TITLES = {
     "fp32_u24": "Random 24-bit inputs",
     "fp32_u32": "Random 32-bit inputs",
@@ -295,7 +297,22 @@ def median_metric(results: list[RunResult], benchmark: str, metric_name: str) ->
     )
 
 
+def report_targets(
+    results: list[RunResult],
+    requested_targets: list[str] | None,
+) -> list[str]:
+    if requested_targets is not None:
+        return requested_targets
+
+    targets: list[str] = []
+    for result in results:
+        if result.target not in targets:
+            targets.append(result.target)
+    return targets
+
+
 def render_markdown(results: list[RunResult], args: argparse.Namespace) -> str:
+    target_names = report_targets(results, args.targets)
     lines = [
         "# Benchmark Results",
         "",
@@ -312,19 +329,29 @@ def render_markdown(results: list[RunResult], args: argparse.Namespace) -> str:
         "Target configuration:",
         "",
     ]
-    for target_name in args.targets:
-        spec = TARGETS[target_name]
-        lines.append(
-            f"- `{target_name}`: `gpu={spec.gpu_type}`, `-arch={spec.cuda_arch}`, "
-            f"`image={spec.cuda_base_image}`"
-        )
-    lines.append("")
-
     results_by_target: dict[str, list[RunResult]] = {}
     for result in results:
         results_by_target.setdefault(result.target, []).append(result)
 
-    for target_name in args.targets:
+    for target_name in target_names:
+        target_results = results_by_target.get(target_name, [])
+        if target_results:
+            sample = target_results[0]
+            gpu_type = sample.requested_gpu_type or sample.gpu_model
+            cuda_arch = sample.cuda_arch or "unknown"
+            cuda_base_image = sample.cuda_base_image or "unknown"
+        else:
+            spec = TARGETS[target_name]
+            gpu_type = spec.gpu_type
+            cuda_arch = spec.cuda_arch
+            cuda_base_image = spec.cuda_base_image
+        lines.append(
+            f"- `{target_name}`: `gpu={gpu_type}`, `-arch={cuda_arch}`, "
+            f"`image={cuda_base_image}`"
+        )
+    lines.append("")
+
+    for target_name in target_names:
         target_results = results_by_target.get(target_name, [])
         if not target_results:
             continue
@@ -425,7 +452,7 @@ def parse_args() -> argparse.Namespace:
         "--targets",
         nargs="+",
         choices=sorted(TARGETS),
-        default=["h100", "b200"],
+        default=None,
     )
     parser.add_argument("--count", type=int, default=1 << 20)
     parser.add_argument("--rounds", type=int, default=1024)
@@ -457,6 +484,9 @@ def main() -> int:
             out_path.write_text(render_markdown(results, args))
             print(f"\nWrote {out_path}")
         return 0
+
+    if args.targets is None:
+        args.targets = list(DEFAULT_TARGETS)
 
     results = []
 
