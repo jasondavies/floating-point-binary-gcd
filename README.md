@@ -38,8 +38,6 @@ This repository contains three related pieces of work:
   binary GCD.
 - `strong_bound_proof_prompt.md`
   Original proof prompt and audit checklist.
-- `blog.md`
-  Article-style writeup of the algorithm and benchmark results.
 
 ## Algorithm summary
 
