@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -377,6 +378,24 @@ static uint32_t parse_u32_or_default(const char *text, uint32_t fallback) {
     return (uint32_t)value;
 }
 
+static int parse_u32_strict(const char *text, uint32_t *out) {
+    char *end = NULL;
+    unsigned long value;
+
+    if (text == NULL || *text < '0' || *text > '9') {
+        return 0;
+    }
+
+    errno = 0;
+    value = strtoul(text, &end, 10);
+    if (errno == ERANGE || end == text || *end != '\0' || value > UINT32_MAX) {
+        return 0;
+    }
+
+    *out = (uint32_t)value;
+    return 1;
+}
+
 static void fill_inputs(uint32_t *a,
                         uint32_t *b,
                         uint32_t count,
@@ -552,8 +571,22 @@ int main(int argc, char **argv) {
     const uint32_t launches = parse_u32_or_default(argc > 4 ? argv[4] : NULL, 20);
     const uint32_t block_size = parse_u32_or_default(argc > 5 ? argv[5] : NULL, 256);
     const int use_fixed_pair = argc > 7;
-    const uint32_t fixed_a = parse_u32_or_default(argc > 6 ? argv[6] : NULL, 0);
-    const uint32_t fixed_b = parse_u32_or_default(argc > 7 ? argv[7] : NULL, 0);
+    uint32_t fixed_a = 0;
+    uint32_t fixed_b = 0;
+
+    if (use_fixed_pair &&
+        (!parse_u32_strict(argv[6], &fixed_a) ||
+         !parse_u32_strict(argv[7], &fixed_b))) {
+        fprintf(stderr, "invalid fixed pair; expected unsigned 32-bit integers\n");
+        return 2;
+    }
+    if (use_fixed_pair && !use_u32 &&
+        (fixed_a > U24_MASK || fixed_b > U24_MASK)) {
+        fprintf(stderr,
+                "invalid fixed pair for u24; expected values <= %u\n",
+                U24_MASK);
+        return 2;
+    }
 
     uint32_t *h_a = (uint32_t *)malloc((size_t)count * sizeof(uint32_t));
     uint32_t *h_b = (uint32_t *)malloc((size_t)count * sizeof(uint32_t));

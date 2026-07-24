@@ -137,6 +137,8 @@ Run the CUDA benchmark locally after building:
 
 Before timing, each CUDA executable validates both implementations against an
 independent host GCD on the benchmark inputs and explicit regression cases.
+Fixed-pair inputs are used exactly as supplied, including zero and even values;
+`u24` and `u53` modes reject values outside their exact-width domains.
 
 Generate exact worst-case data for `k = 1..8`:
 

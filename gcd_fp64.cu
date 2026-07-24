@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <inttypes.h>
 #include <math.h>
 #include <stdint.h>
@@ -98,17 +99,22 @@ static uint32_t parse_u32_or_default(const char *text, uint32_t fallback) {
     return (uint32_t)value;
 }
 
-static uint64_t parse_u64_or_default(const char *text, uint64_t fallback) {
-    if (text == NULL) {
-        return fallback;
+static int parse_u64_strict(const char *text, uint64_t *out) {
+    char *end = NULL;
+    unsigned long long value;
+
+    if (text == NULL || *text < '0' || *text > '9') {
+        return 0;
     }
 
-    char *end = NULL;
-    unsigned long long value = strtoull(text, &end, 10);
-    if (end == text || *end != '\0') {
-        return fallback;
+    errno = 0;
+    value = strtoull(text, &end, 10);
+    if (errno == ERANGE || end == text || *end != '\0') {
+        return 0;
     }
-    return (uint64_t)value;
+
+    *out = (uint64_t)value;
+    return 1;
 }
 
 __host__ __device__ __forceinline__ uint64_t next_u53(uint64_t x, uint64_t mul, uint64_t add) {
@@ -127,10 +133,6 @@ static void fill_inputs(uint64_t *a,
                         uint64_t fixed_a,
                         uint64_t fixed_b) {
     if (use_fixed_pair) {
-        if (!use_u64) {
-            fixed_a = (fixed_a & U53_MASK) | 1ull;
-            fixed_b = (fixed_b & U53_MASK) | 1ull;
-        }
         for (uint32_t i = 0; i < count; ++i) {
             a[i] = fixed_a;
             b[i] = fixed_b;
@@ -597,8 +599,22 @@ int main(int argc, char **argv) {
     const uint32_t launches = parse_u32_or_default(argc > 4 ? argv[4] : NULL, 20);
     const uint32_t block_size = parse_u32_or_default(argc > 5 ? argv[5] : NULL, 256);
     const int use_fixed_pair = argc > 7;
-    const uint64_t fixed_a = parse_u64_or_default(argc > 6 ? argv[6] : NULL, 0ull);
-    const uint64_t fixed_b = parse_u64_or_default(argc > 7 ? argv[7] : NULL, 0ull);
+    uint64_t fixed_a = 0ull;
+    uint64_t fixed_b = 0ull;
+
+    if (use_fixed_pair &&
+        (!parse_u64_strict(argv[6], &fixed_a) ||
+         !parse_u64_strict(argv[7], &fixed_b))) {
+        fprintf(stderr, "invalid fixed pair; expected unsigned 64-bit integers\n");
+        return 2;
+    }
+    if (use_fixed_pair && !use_u64 &&
+        (fixed_a > U53_MASK || fixed_b > U53_MASK)) {
+        fprintf(stderr,
+                "invalid fixed pair for u53; expected values <= %" PRIu64 "\n",
+                (uint64_t)U53_MASK);
+        return 2;
+    }
 
     uint64_t *h_a = (uint64_t *)malloc((size_t)count * sizeof(uint64_t));
     uint64_t *h_b = (uint64_t *)malloc((size_t)count * sizeof(uint64_t));
