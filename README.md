@@ -157,7 +157,7 @@ Notes for `exact_threshold_search`:
 - `max`, `parallel`, `pareto`, and larger `table` runs are exhaustive searches
   and can run for a long time even with pruning.
 - `visit_limit_hit=1` means the run did not finish exactly within the chosen
-  search budget.
+  search budget; the command exits with a nonzero status.
 - `table.txt` is the checked-in output table through `k = 128`.
 
 ## Modal benchmarking

@@ -766,6 +766,7 @@ static int run_search_mode(int argc, char **argv) {
     Pair start = {1, 0};
     uint8_t start_depth = 0;
     unsigned long parsed_start_depth = 0;
+    int limit_hit;
 
     if (argc < 4 || argc > 9) {
         usage(argv[0]);
@@ -827,12 +828,13 @@ static int run_search_mode(int argc, char **argv) {
         fprint_pair(stdout, ctx.witness);
         fputc('\n', stdout);
     }
-    if (ctx.visits > ctx.visit_limit) {
+    limit_hit = ctx.visits > ctx.visit_limit;
+    if (limit_hit) {
         printf("visit_limit_hit=1\n");
     }
 
     search_context_destroy(&ctx);
-    return 0;
+    return limit_hit ? 1 : 0;
 }
 
 typedef struct {
@@ -1244,7 +1246,7 @@ static int run_parallel_mode(int argc, char **argv) {
     }
 
     frontier_destroy(&frontier);
-    return 0;
+    return result.limit_hit ? 1 : 0;
 }
 
 static int run_max_mode(int argc, char **argv) {
