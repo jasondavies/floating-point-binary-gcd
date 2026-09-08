@@ -16,6 +16,11 @@ exact_threshold_search
 # Python cache
 __pycache__/
 *.pyc
+.venv/
+
+# Local build and proof dependency outputs
+build/
+.lake/
 
 # Editor files
 *.swp

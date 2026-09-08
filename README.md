@@ -17,13 +17,20 @@ This repository contains three related pieces of work:
   CUDA benchmark for `fp32_u24`, `stein_u24`, `fp32_u32`, and `stein_u32`.
 - `gcd_fp64.cu`
   CUDA benchmark for `fp64_u53`, `stein_u53`, `fp64_u64`, and `stein_u64`.
+- `bench_host.cuh`, `bench_cli.h`, `parse_decimal.h`
+  Shared CUDA host harness and strict decimal argument parsing.
 - `modal_fp32_bench.py`, `modal_fp64_bench.py`
-  Modal entrypoints that build the CUDA binaries remotely and run one benchmark.
+  Thin Modal entrypoints using `modal_bench_common.py` for build and execution
+  and `bench_config.py` for workloads, targets, and Python defaults.
 - `run_modal_repeats.py`
   Repeats Modal runs across target GPUs and can regenerate
   `benchmarks.md`.
 - `benchmarks.md`
-  Current checked-in benchmark snapshot from Modal runs on 2026-03-17.
+  Historical benchmark snapshot combining March and July 2026 runs.
+- `Makefile`, `tests/`
+  Local CPU, argument-parser, report, and optional CUDA checks.
+- `lean-toolchain`, `lakefile.toml`, `lake-manifest.json`
+  Pinned Lean 4.28.0 and Mathlib dependencies for building both proofs.
 - `exact_threshold_search.c`
   Exact reverse search for threshold, max-step, frontier, and Pareto queries
   up to `k = 128`.
@@ -72,13 +79,6 @@ corrected `u32` and `u64` hybrid rows were run on 2026-07-24. All runs used
 `count=1048576`, `rounds=1024`, `launches=20`, `block_size=256`, and
 `repeats=3` per requested GPU target.
 
-| GPU | `u24` speedup | `u32` speedup | `u53` speedup | `u64` speedup |
-| --- | ---: | ---: | ---: | ---: |
-| NVIDIA Tesla T4 | 1.33x | 1.22x | 0.13x | 0.18x |
-| NVIDIA A100 80GB PCIe | 1.67x | 1.56x | 1.44x | 1.38x |
-| NVIDIA H100 80GB HBM3 | 1.71x | 1.50x | 1.58x | 1.40x |
-| NVIDIA B200 | 1.83x | 1.44x | 1.55x | 1.40x |
-
 Takeaways:
 
 - `fp32_u24` beats Stein on every GPU in the current snapshot.
@@ -91,7 +91,17 @@ Takeaways:
 
 ## Build
 
-CPU tools:
+Build the CPU tools and run the local checks (C/C++ compilers and Python 3.11+):
+
+```sh
+make check
+```
+
+This checks the CPU loop, compares small reverse-search results with an
+independent forward model, and tests strict argument parsing, saved-report
+metadata, and benchmark checkpointing. These checks do not require Modal or a GPU.
+
+Equivalent CPU build commands:
 
 ```sh
 cc -O3 -std=c11 -Wall -Wextra -Wpedantic gcd_fp32.c -lm -o gcd_fp32
@@ -101,16 +111,26 @@ cc -O3 -std=c11 -Wall -Wextra -Wpedantic -pthread exact_threshold_search.c -o ex
 CUDA benchmarks:
 
 ```sh
-nvcc -O3 -arch=sm_89 gcd_fp32.cu -o gcd_bench
-nvcc -O3 -arch=sm_90 gcd_fp64.cu -o gcd_bench_u53
+make cuda CUDA_ARCH=sm_90
 ```
 
-Useful architecture flags from the checked-in Modal setup:
+Set `NVCC=/path/to/nvcc` if the compiler is outside `PATH`.
+`make check-cuda-cli` compiles both binaries and checks their help entrypoints
+without a GPU. `make check-cuda CUDA_ARCH=sm_90` runs small random and fixed-pair
+validation workloads on a compatible NVIDIA GPU.
 
-- `sm_75` for T4
-- `sm_80` for A100
-- `sm_90` for H100
-- `sm_100` for B200
+The Modal target-to-architecture mapping is defined in `bench_config.py`.
+
+To check the proofs, install Lean's `elan` toolchain manager, then run:
+
+```sh
+make proofs
+```
+
+`lean-toolchain` selects Lean 4.28.0. Lake resolves the exact Mathlib revision and
+transitive dependencies from the checked-in manifest, downloads the prebuilt
+Mathlib cache, and builds `StrongBoundProof` and `SteinBound`.
+You can also set `LAKE=/path/to/lake` for an existing matching toolchain.
 
 ## Local examples
 
@@ -139,6 +159,9 @@ Before timing, each CUDA executable validates both implementations against an
 independent host GCD on the benchmark inputs and explicit regression cases.
 Fixed-pair inputs are used exactly as supplied, including zero and even values;
 `u24` and `u53` modes reject values outside their exact-width domains.
+Unknown modes, malformed numbers, zero timing parameters, and incomplete fixed
+pairs are rejected. Use `./gcd_bench --help` or `./gcd_bench_u53 --help` for
+the positional argument order.
 
 Generate exact worst-case data for `k = 1..8`:
 
@@ -167,7 +190,7 @@ Notes for `exact_threshold_search`:
 Install and configure Modal first:
 
 ```sh
-python3 -m pip install modal
+python3 -m pip install -r requirements-modal.txt
 python3 -m modal setup
 ```
 
@@ -190,15 +213,35 @@ For example, to pin an H100 run:
 MODAL_GPU_TYPE=H100! MODAL_CUDA_ARCH=sm_90 python3 -m modal run modal_fp64_bench.py --mode both_u53
 ```
 
-To regenerate the benchmark markdown from repeated runs:
+To collect repeated runs and generate a benchmark report:
 
 ```sh
 python3 run_modal_repeats.py \
   --python python3 \
   --targets t4 a100 h100 b200 \
   --repeats 3 \
+  --json-out benchmark-runs.json \
   --markdown-out benchmarks.md
 ```
+
+The JSON file is atomically checkpointed after each successful run, so a later
+failure preserves earlier results. Save this JSON alongside any published report.
+Each result records the actual invocation parameters, timestamp, repeat index,
+GPU/build configuration, metrics, and raw output.
+
+Regenerate Markdown without running or paying for new benchmarks:
+
+```sh
+python3 run_modal_repeats.py \
+  --summary-from-json benchmark-runs.json \
+  --markdown-out benchmarks.md
+```
+
+Reports use saved parameters and timestamps, show the actual number of runs per
+workload, and keep different input configurations and GPU models separate.
+Older JSON files recover parameters from raw output when available; unavailable
+metadata is reported as unknown. The existing historical `benchmarks.md`
+snapshot has no source JSON in this repository and is retained as an archive.
 
 ## Proof and search artifacts
 

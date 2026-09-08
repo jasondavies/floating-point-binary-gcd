@@ -1,0 +1,2 @@
+# Tested client version. CPU checks and JSON reporting need only Python 3.11+.
+modal==1.5.3

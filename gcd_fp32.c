@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "parse_decimal.h"
 
 typedef struct {
     uint32_t steps;
@@ -153,9 +154,8 @@ static void usage(const char *prog) {
 }
 
 static int parse_u24(const char *text, uint32_t *out) {
-    char *end = NULL;
-    unsigned long value = strtoul(text, &end, 10);
-    if (end == text || *end != '\0' || value > 16777215ul) {
+    uint64_t value;
+    if (!parse_decimal_u64(text, 16777215u, &value)) {
         return 0;
     }
     *out = (uint32_t)value;

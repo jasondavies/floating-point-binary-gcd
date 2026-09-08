@@ -7,6 +7,8 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <unistd.h>
+#include <limits.h>
+#include "parse_decimal.h"
 
 typedef __uint128_t u128;
 
@@ -34,7 +36,6 @@ typedef struct {
     uint64_t visits;
     uint64_t visit_limit;
     uint64_t progress_interval;
-    size_t seen_capacity;
     DepthTable seen;
     Pair *pred_buf;
     Pair witness;
@@ -60,7 +61,6 @@ typedef struct {
     int target_depth;
     uint64_t visits;
     uint64_t visit_limit;
-    size_t seen_capacity;
     DepthTable seen;
     Pair *pred_buf;
     PairList pareto;
@@ -497,61 +497,36 @@ static void add_candidate(Pair *out, int *count, Pair candidate) {
     *count += 1;
 }
 
+static void add_predecessor_orientation(u128 b, u128 r, int k, u128 limit,
+                                        Pair *out, int *count) {
+    int bl = bit_length_u128(b);
+    for (int e = 0; e <= k - bl; ++e) {
+        u128 t = b << e;
+        if (t <= limit - r) {
+            u128 a = t + r;
+            if (bit_length_u128(a) == bl + e && a >= b) {
+                Pair candidate = {a, b};
+                add_candidate(out, count, candidate);
+            }
+        }
+        if (t > r) {
+            u128 a = t - r;
+            if (bit_length_u128(a) == bl + e && a >= b) {
+                Pair candidate = {a, b};
+                add_candidate(out, count, candidate);
+            }
+        }
+    }
+}
+
 static int generate_predecessors(Pair state, int k, u128 limit, Pair *out) {
     int count = 0;
-    u128 x = state.a;
-    u128 y = state.b;
-
-    if (y < x && x != 0) {
-        u128 b = x;
-        u128 r = y;
-        int bl = bit_length_u128(b);
-        int max_e = k - bl;
-        int e;
-        for (e = 0; e <= max_e; ++e) {
-            u128 t = b << e;
-            if (t <= limit - r) {
-                u128 a = t + r;
-                if (bit_length_u128(a) == bl + e && a >= b) {
-                    Pair cand = {a, b};
-                    add_candidate(out, &count, cand);
-                }
-            }
-            if (t > r) {
-                u128 a = t - r;
-                if (bit_length_u128(a) == bl + e && a >= b) {
-                    Pair cand = {a, b};
-                    add_candidate(out, &count, cand);
-                }
-            }
-        }
+    if (state.b < state.a && state.a != 0) {
+        add_predecessor_orientation(state.a, state.b, k, limit, out, &count);
     }
-
-    if (y != 0) {
-        u128 b = y;
-        u128 r = x;
-        int bl = bit_length_u128(b);
-        int max_e = k - bl;
-        int e;
-        for (e = 0; e <= max_e; ++e) {
-            u128 t = b << e;
-            if (t <= limit - r) {
-                u128 a = t + r;
-                if (bit_length_u128(a) == bl + e && a >= b) {
-                    Pair cand = {a, b};
-                    add_candidate(out, &count, cand);
-                }
-            }
-            if (t > r) {
-                u128 a = t - r;
-                if (bit_length_u128(a) == bl + e && a >= b) {
-                    Pair cand = {a, b};
-                    add_candidate(out, &count, cand);
-                }
-            }
-        }
+    if (state.b != 0) {
+        add_predecessor_orientation(state.b, state.a, k, limit, out, &count);
     }
-
     qsort(out, (size_t)count, sizeof(Pair), pair_cmp_desc);
     return count;
 }
@@ -568,7 +543,6 @@ static void search_context_init(SearchContext *ctx,
     ctx->target_depth = target_depth;
     ctx->visit_limit = visit_limit;
     ctx->progress_interval = progress_interval;
-    ctx->seen_capacity = seen_capacity;
     depth_table_init(&ctx->seen, seen_capacity);
     ctx->pred_buf =
         malloc((size_t)(ctx->target_depth + 1) * MAX_PREDS * sizeof(Pair));
@@ -593,7 +567,6 @@ static void collect_context_init(CollectContext *ctx,
     ctx->limit = limit_for_bits(k);
     ctx->target_depth = target_depth;
     ctx->visit_limit = visit_limit;
-    ctx->seen_capacity = seen_capacity;
     depth_table_init(&ctx->seen, seen_capacity);
     ctx->pred_buf =
         malloc((size_t)(ctx->target_depth + 1) * MAX_PREDS * sizeof(Pair));
@@ -720,6 +693,15 @@ static void usage(const char *prog) {
     exit(2);
 }
 
+static uint64_t parse_arg(const char *text, uint64_t maximum) {
+    uint64_t value;
+    if (!parse_decimal_u64(text, maximum, &value)) {
+        fprintf(stderr, "invalid unsigned decimal argument: %s\n", text);
+        exit(2);
+    }
+    return value;
+}
+
 static void usage_invalid_k(const char *prog, int k) {
     fprintf(stderr, "invalid k=%d; expected 1 <= k <= %d\n", k, MAX_K_BITS);
     usage(prog);
@@ -740,8 +722,8 @@ static int run_frontier_mode(int argc, char **argv) {
         usage(argv[0]);
     }
 
-    k = atoi(argv[2]);
-    target_depth = atoi(argv[3]);
+    k = (int)parse_arg(argv[2], INT_MAX);
+    target_depth = (int)parse_arg(argv[3], INT_MAX);
     if (k <= 0 || k > MAX_K_BITS) {
         usage_invalid_k(argv[0], k);
     }
@@ -765,7 +747,6 @@ static int run_search_mode(int argc, char **argv) {
     SearchContext ctx;
     Pair start = {1, 0};
     uint8_t start_depth = 0;
-    unsigned long parsed_start_depth = 0;
     int limit_hit;
 
     if (argc < 4 || argc > 9) {
@@ -773,22 +754,22 @@ static int run_search_mode(int argc, char **argv) {
     }
 
     memset(&ctx, 0, sizeof(ctx));
-    ctx.k = atoi(argv[2]);
-    ctx.target_depth = atoi(argv[3]);
-    ctx.visit_limit = (argc >= 5) ? strtoull(argv[4], NULL, 10) : 100000000ULL;
+    ctx.k = (int)parse_arg(argv[2], INT_MAX);
+    ctx.target_depth = (int)parse_arg(argv[3], INT_MAX);
+    ctx.visit_limit = (argc >= 5) ? parse_arg(argv[4], UINT64_MAX) : 100000000ULL;
     ctx.progress_interval =
-        (argc >= 6) ? strtoull(argv[5], NULL, 10) : 0ULL;
+        (argc >= 6) ? parse_arg(argv[5], UINT64_MAX) : 0ULL;
     if (argc == 9) {
         if (!parse_u128(argv[6], &start.a) || !parse_u128(argv[7], &start.b)) {
             fprintf(stderr, "invalid start pair; expected unsigned decimal integers\n");
             return 2;
         }
-        parsed_start_depth = strtoul(argv[8], NULL, 10);
-        if (parsed_start_depth > UINT8_MAX) {
-            fprintf(stderr, "start depth must fit in uint8_t\n");
+        start_depth = (uint8_t)parse_arg(argv[8], UINT8_MAX);
+        if (start_depth > ctx.target_depth || start.a == 0 || start.a < start.b ||
+            start.a > limit_for_bits(ctx.k)) {
+            fprintf(stderr, "invalid start state or depth for this search\n");
             return 2;
         }
-        start_depth = (uint8_t)parsed_start_depth;
         start = normalize_pair(start);
     } else if (argc != 4 && argc != 5 && argc != 6) {
         usage(argv[0]);
@@ -883,14 +864,8 @@ typedef struct {
     PairList pareto;
 } ParetoResult;
 
-typedef struct {
-    void *control;
-    int worker_id;
-} WorkerArgs;
-
 static void *parallel_worker(void *arg) {
-    WorkerArgs *args = (WorkerArgs *)arg;
-    ParallelControl *control = (ParallelControl *)args->control;
+    ParallelControl *control = (ParallelControl *)arg;
 
     for (;;) {
         size_t idx;
@@ -939,8 +914,7 @@ static void *parallel_worker(void *arg) {
 }
 
 static void *pareto_worker(void *arg) {
-    WorkerArgs *args = (WorkerArgs *)arg;
-    ParetoControl *control = (ParetoControl *)args->control;
+    ParetoControl *control = (ParetoControl *)arg;
 
     for (;;) {
         size_t idx;
@@ -991,16 +965,40 @@ static int default_thread_count(void) {
     return (int)n;
 }
 
+static void run_workers(int thread_count, void *(*worker)(void *), void *control) {
+    pthread_attr_t attr;
+    pthread_t *threads = malloc((size_t)thread_count * sizeof(*threads));
+    if (threads == NULL) {
+        fprintf(stderr, "allocation failed for threads\n");
+        exit(1);
+    }
+    if (pthread_attr_init(&attr) != 0 ||
+        pthread_attr_setstacksize(&attr, WORKER_STACK_SIZE) != 0) {
+        fprintf(stderr, "thread attribute setup failed\n");
+        exit(1);
+    }
+    for (int i = 0; i < thread_count; ++i) {
+        if (pthread_create(&threads[i], &attr, worker, control) != 0) {
+            fprintf(stderr, "pthread_create failed\n");
+            exit(1);
+        }
+    }
+    for (int i = 0; i < thread_count; ++i) {
+        if (pthread_join(threads[i], NULL) != 0) {
+            fprintf(stderr, "pthread_join failed\n");
+            exit(1);
+        }
+    }
+    pthread_attr_destroy(&attr);
+    free(threads);
+}
+
 static ThresholdResult parallel_threshold_search(Frontier *frontier,
                                                  int k,
                                                  int target_depth,
                                                  int thread_count,
                                                  uint64_t visit_limit) {
     ParallelControl control;
-    pthread_attr_t attr;
-    pthread_t *threads;
-    WorkerArgs *args;
-    int i;
     ThresholdResult result;
 
     memset(&result, 0, sizeof(result));
@@ -1016,38 +1014,8 @@ static ThresholdResult parallel_threshold_search(Frontier *frontier,
     atomic_init(&control.limit_hit, 0);
     pthread_mutex_init(&control.witness_mu, NULL);
 
-    threads = malloc((size_t)thread_count * sizeof(pthread_t));
-    args = malloc((size_t)thread_count * sizeof(WorkerArgs));
-    if (threads == NULL || args == NULL) {
-        fprintf(stderr, "allocation failed for threads\n");
-        exit(1);
-    }
-    if (pthread_attr_init(&attr) != 0) {
-        fprintf(stderr, "pthread_attr_init failed\n");
-        exit(1);
-    }
-    if (pthread_attr_setstacksize(&attr, WORKER_STACK_SIZE) != 0) {
-        fprintf(stderr, "pthread_attr_setstacksize failed\n");
-        exit(1);
-    }
-
-    for (i = 0; i < thread_count; ++i) {
-        args[i].control = &control;
-        args[i].worker_id = i;
-        if (pthread_create(&threads[i], &attr, parallel_worker, &args[i]) != 0) {
-            fprintf(stderr, "pthread_create failed\n");
-            exit(1);
-        }
-    }
-
-    for (i = 0; i < thread_count; ++i) {
-        pthread_join(threads[i], NULL);
-    }
-
+    run_workers(thread_count, parallel_worker, &control);
     pthread_mutex_destroy(&control.witness_mu);
-    pthread_attr_destroy(&attr);
-    free(threads);
-    free(args);
 
     result.found = atomic_load(&control.found);
     result.limit_hit = atomic_load(&control.limit_hit);
@@ -1063,10 +1031,6 @@ static ParetoResult parallel_collect_pareto(Frontier *frontier,
                                             int thread_count,
                                             uint64_t visit_limit) {
     ParetoControl control;
-    pthread_attr_t attr;
-    pthread_t *threads;
-    WorkerArgs *args;
-    int i;
     ParetoResult result;
 
     memset(&result, 0, sizeof(result));
@@ -1083,38 +1047,8 @@ static ParetoResult parallel_collect_pareto(Frontier *frontier,
     pair_list_init(&control.pareto, 16);
     pthread_mutex_init(&control.pareto_mu, NULL);
 
-    threads = malloc((size_t)thread_count * sizeof(pthread_t));
-    args = malloc((size_t)thread_count * sizeof(WorkerArgs));
-    if (threads == NULL || args == NULL) {
-        fprintf(stderr, "allocation failed for threads\n");
-        exit(1);
-    }
-    if (pthread_attr_init(&attr) != 0) {
-        fprintf(stderr, "pthread_attr_init failed\n");
-        exit(1);
-    }
-    if (pthread_attr_setstacksize(&attr, WORKER_STACK_SIZE) != 0) {
-        fprintf(stderr, "pthread_attr_setstacksize failed\n");
-        exit(1);
-    }
-
-    for (i = 0; i < thread_count; ++i) {
-        args[i].control = &control;
-        args[i].worker_id = i;
-        if (pthread_create(&threads[i], &attr, pareto_worker, &args[i]) != 0) {
-            fprintf(stderr, "pthread_create failed\n");
-            exit(1);
-        }
-    }
-
-    for (i = 0; i < thread_count; ++i) {
-        pthread_join(threads[i], NULL);
-    }
-
+    run_workers(thread_count, pareto_worker, &control);
     pthread_mutex_destroy(&control.pareto_mu);
-    pthread_attr_destroy(&attr);
-    free(threads);
-    free(args);
 
     result.limit_hit = atomic_load(&control.limit_hit);
     result.visits = atomic_load(&control.total_visits);
@@ -1208,11 +1142,11 @@ static int run_parallel_mode(int argc, char **argv) {
         usage(argv[0]);
     }
 
-    k = atoi(argv[2]);
-    target_depth = atoi(argv[3]);
-    frontier_depth = atoi(argv[4]);
-    thread_count = (argc >= 6) ? atoi(argv[5]) : default_thread_count();
-    visit_limit = (argc >= 7) ? strtoull(argv[6], NULL, 10) : 100000000ULL;
+    k = (int)parse_arg(argv[2], INT_MAX);
+    target_depth = (int)parse_arg(argv[3], INT_MAX);
+    frontier_depth = (int)parse_arg(argv[4], INT_MAX);
+    thread_count = (argc >= 6) ? (int)parse_arg(argv[5], INT_MAX) : default_thread_count();
+    visit_limit = (argc >= 7) ? parse_arg(argv[6], UINT64_MAX) : 100000000ULL;
 
     if (k <= 0 || k > MAX_K_BITS) {
         usage_invalid_k(argv[0], k);
@@ -1260,10 +1194,10 @@ static int run_max_mode(int argc, char **argv) {
         usage(argv[0]);
     }
 
-    k = atoi(argv[2]);
-    frontier_depth = atoi(argv[3]);
-    thread_count = (argc >= 5) ? atoi(argv[4]) : default_thread_count();
-    visit_limit = (argc >= 6) ? strtoull(argv[5], NULL, 10) : 100000000ULL;
+    k = (int)parse_arg(argv[2], INT_MAX);
+    frontier_depth = (int)parse_arg(argv[3], INT_MAX);
+    thread_count = (argc >= 5) ? (int)parse_arg(argv[4], INT_MAX) : default_thread_count();
+    visit_limit = (argc >= 6) ? parse_arg(argv[5], UINT64_MAX) : 100000000ULL;
 
     if (k <= 0 || k > MAX_K_BITS) {
         usage_invalid_k(argv[0], k);
@@ -1303,10 +1237,10 @@ static int run_table_mode(int argc, char **argv) {
         usage(argv[0]);
     }
 
-    n = atoi(argv[2]);
-    frontier_depth = atoi(argv[3]);
-    thread_count = (argc >= 5) ? atoi(argv[4]) : default_thread_count();
-    visit_limit = (argc >= 6) ? strtoull(argv[5], NULL, 10) : 100000000ULL;
+    n = (int)parse_arg(argv[2], INT_MAX);
+    frontier_depth = (int)parse_arg(argv[3], INT_MAX);
+    thread_count = (argc >= 5) ? (int)parse_arg(argv[4], INT_MAX) : default_thread_count();
+    visit_limit = (argc >= 6) ? parse_arg(argv[5], UINT64_MAX) : 100000000ULL;
 
     if (n <= 0 || n > MAX_K_BITS) {
         usage_invalid_n(argv[0], n);
@@ -1355,10 +1289,10 @@ static int run_pareto_mode(int argc, char **argv) {
         usage(argv[0]);
     }
 
-    k = atoi(argv[2]);
-    frontier_depth = atoi(argv[3]);
-    thread_count = (argc >= 5) ? atoi(argv[4]) : default_thread_count();
-    visit_limit = (argc >= 6) ? strtoull(argv[5], NULL, 10) : 100000000ULL;
+    k = (int)parse_arg(argv[2], INT_MAX);
+    frontier_depth = (int)parse_arg(argv[3], INT_MAX);
+    thread_count = (argc >= 5) ? (int)parse_arg(argv[4], INT_MAX) : default_thread_count();
+    visit_limit = (argc >= 6) ? parse_arg(argv[5], UINT64_MAX) : 100000000ULL;
 
     if (k <= 0 || k > MAX_K_BITS) {
         usage_invalid_k(argv[0], k);
@@ -1413,10 +1347,10 @@ static int run_pareto_table_mode(int argc, char **argv) {
         usage(argv[0]);
     }
 
-    n = atoi(argv[2]);
-    frontier_depth = atoi(argv[3]);
-    thread_count = (argc >= 5) ? atoi(argv[4]) : default_thread_count();
-    visit_limit = (argc >= 6) ? strtoull(argv[5], NULL, 10) : 100000000ULL;
+    n = (int)parse_arg(argv[2], INT_MAX);
+    frontier_depth = (int)parse_arg(argv[3], INT_MAX);
+    thread_count = (argc >= 5) ? (int)parse_arg(argv[4], INT_MAX) : default_thread_count();
+    visit_limit = (argc >= 6) ? parse_arg(argv[5], UINT64_MAX) : 100000000ULL;
 
     if (n <= 0 || n > MAX_K_BITS) {
         usage_invalid_n(argv[0], n);

@@ -1,121 +1,11 @@
-#include <errno.h>
-#include <inttypes.h>
-#include <math.h>
 #include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-
+#include <math.h>
 #include <cuda_runtime.h>
 
 #define U53_MASK ((1ull << 53) - 1ull)
 // For odd 64-bit operands, each bundled Stein reduction at least halves their
 // sum. Twelve reductions make the sum < 2^53, so both operands are exact in fp64.
 #define HYBRID_STEIN_FRONTEND_ITERS_U64 12u
-#define VALIDATION_BLOCK_SIZE 256u
-
-#define CUDA_CHECK(call)                                                          \
-    do {                                                                          \
-        cudaError_t err__ = (call);                                               \
-        if (err__ != cudaSuccess) {                                               \
-            fprintf(stderr, "%s failed: %s\n", #call, cudaGetErrorString(err__)); \
-            return 1;                                                             \
-        }                                                                         \
-    } while (0)
-
-typedef enum {
-    MODE_BOTH_U53 = 0,
-    MODE_FP64_U53,
-    MODE_STEIN_U53,
-    MODE_BOTH_U64,
-    MODE_FP64_U64,
-    MODE_STEIN_U64,
-} bench_mode;
-
-static bench_mode parse_mode_or_default(const char *text) {
-    if (text == NULL || strcmp(text, "both") == 0 || strcmp(text, "both_u53") == 0) {
-        return MODE_BOTH_U53;
-    }
-    if (strcmp(text, "fp64") == 0 || strcmp(text, "fp64_u53") == 0) {
-        return MODE_FP64_U53;
-    }
-    if (strcmp(text, "stein") == 0 || strcmp(text, "stein_u53") == 0) {
-        return MODE_STEIN_U53;
-    }
-    if (strcmp(text, "both_u64") == 0) {
-        return MODE_BOTH_U64;
-    }
-    if (strcmp(text, "fp64_u64") == 0) {
-        return MODE_FP64_U64;
-    }
-    if (strcmp(text, "stein_u64") == 0) {
-        return MODE_STEIN_U64;
-    }
-    return MODE_BOTH_U53;
-}
-
-static int mode_is_u64(bench_mode mode) {
-    return mode == MODE_BOTH_U64 || mode == MODE_FP64_U64 || mode == MODE_STEIN_U64;
-}
-
-static int mode_runs_fp64(bench_mode mode) {
-    return mode == MODE_BOTH_U53 || mode == MODE_FP64_U53 ||
-           mode == MODE_BOTH_U64 || mode == MODE_FP64_U64;
-}
-
-static int mode_runs_stein(bench_mode mode) {
-    return mode == MODE_BOTH_U53 || mode == MODE_STEIN_U53 ||
-           mode == MODE_BOTH_U64 || mode == MODE_STEIN_U64;
-}
-
-static const char *mode_name(bench_mode mode) {
-    switch (mode) {
-    case MODE_BOTH_U53:
-        return "both_u53";
-    case MODE_FP64_U53:
-        return "fp64_u53";
-    case MODE_STEIN_U53:
-        return "stein_u53";
-    case MODE_BOTH_U64:
-        return "both_u64";
-    case MODE_FP64_U64:
-        return "fp64_u64";
-    case MODE_STEIN_U64:
-        return "stein_u64";
-    }
-    return "both_u53";
-}
-
-static uint32_t parse_u32_or_default(const char *text, uint32_t fallback) {
-    if (text == NULL) {
-        return fallback;
-    }
-
-    char *end = NULL;
-    unsigned long value = strtoul(text, &end, 10);
-    if (end == text || *end != '\0') {
-        return fallback;
-    }
-    return (uint32_t)value;
-}
-
-static int parse_u64_strict(const char *text, uint64_t *out) {
-    char *end = NULL;
-    unsigned long long value;
-
-    if (text == NULL || *text < '0' || *text > '9') {
-        return 0;
-    }
-
-    errno = 0;
-    value = strtoull(text, &end, 10);
-    if (errno == ERANGE || end == text || *end != '\0') {
-        return 0;
-    }
-
-    *out = (uint64_t)value;
-    return 1;
-}
 
 __host__ __device__ __forceinline__ uint64_t next_u53(uint64_t x, uint64_t mul, uint64_t add) {
     return ((x * mul + add) & U53_MASK) | 1ull;
@@ -123,37 +13,6 @@ __host__ __device__ __forceinline__ uint64_t next_u53(uint64_t x, uint64_t mul, 
 
 __host__ __device__ __forceinline__ uint64_t next_u64(uint64_t x, uint64_t mul, uint64_t add) {
     return (x * mul + add) | 1ull;
-}
-
-static void fill_inputs(uint64_t *a,
-                        uint64_t *b,
-                        uint32_t count,
-                        int use_u64,
-                        int use_fixed_pair,
-                        uint64_t fixed_a,
-                        uint64_t fixed_b) {
-    if (use_fixed_pair) {
-        for (uint32_t i = 0; i < count; ++i) {
-            a[i] = fixed_a;
-            b[i] = fixed_b;
-        }
-        return;
-    }
-
-    uint64_t x = 1ull;
-    uint64_t y = 2ull;
-
-    for (uint32_t i = 0; i < count; ++i) {
-        if (use_u64) {
-            x = next_u64(x, 6364136223846793005ull, 1442695040888963407ull);
-            y = next_u64(y, 2862933555777941757ull, 3037000493ull);
-        } else {
-            x = next_u53(x, 6364136223846793005ull, 1442695040888963407ull);
-            y = next_u53(y, 2862933555777941757ull, 3037000493ull);
-        }
-        a[i] = x;
-        b[i] = y;
-    }
 }
 
 __device__ __forceinline__ double fp64_splice_exponent(double mantissa_src, double exponent_src) {
@@ -350,348 +209,78 @@ extern "C" __global__ void gcd_stein_u64_kernel(const uint64_t *a,
     out[idx] = acc;
 }
 
-static uint64_t gcd_host_reference(uint64_t a, uint64_t b) {
-    while (b != 0ull) {
-        uint64_t remainder = a % b;
-        a = b;
-        b = remainder;
-    }
-    return a;
-}
+struct BenchSpec {
+    using Word = uint64_t;
+    static constexpr const char *precision = "fp64";
+    static constexpr unsigned exact_bits = 53;
 
-static int check_validation_output(const char *implementation,
-                                   const uint64_t *h_a,
-                                   const uint64_t *h_b,
-                                   const uint64_t *h_out,
-                                   uint32_t count) {
-    for (uint32_t i = 0; i < count; ++i) {
-        uint64_t expected = gcd_host_reference(h_a[i], h_b[i]);
-        if (h_out[i] != expected) {
-            fprintf(stderr,
-                    "validation mismatch: implementation=%s index=%u "
-                    "input=%" PRIu64 ",%" PRIu64 " expected=%" PRIu64
-                    " actual=%" PRIu64 "\n",
-                    implementation,
-                    i,
-                    h_a[i],
-                    h_b[i],
-                    expected,
-                    h_out[i]);
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static int validate_dataset(int use_u64,
-                            const uint64_t *h_a,
-                            const uint64_t *h_b,
-                            const uint64_t *d_a,
-                            const uint64_t *d_b,
-                            uint64_t *d_out,
-                            uint64_t *h_out,
-                            uint32_t count) {
-    const uint32_t grid_size =
-        (count + VALIDATION_BLOCK_SIZE - 1u) / VALIDATION_BLOCK_SIZE;
-    const char *fp_name = use_u64 ? "fp64_u64" : "fp64_u53";
-    const char *stein_name = use_u64 ? "stein_u64" : "stein_u53";
-
-    if (use_u64) {
-        gcd_fp64_u64_kernel<<<grid_size, VALIDATION_BLOCK_SIZE>>>(
-            d_a, d_b, d_out, count, 1u, 1);
-    } else {
-        gcd_fp64_u53_kernel<<<grid_size, VALIDATION_BLOCK_SIZE>>>(
-            d_a, d_b, d_out, count, 1u, 1);
-    }
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaMemcpy(
-        h_out, d_out, (size_t)count * sizeof(uint64_t), cudaMemcpyDeviceToHost));
-    if (check_validation_output(fp_name, h_a, h_b, h_out, count) != 0) {
-        return 1;
-    }
-
-    if (use_u64) {
-        gcd_stein_u64_kernel<<<grid_size, VALIDATION_BLOCK_SIZE>>>(
-            d_a, d_b, d_out, count, 1u, 1);
-    } else {
-        gcd_stein_u53_kernel<<<grid_size, VALIDATION_BLOCK_SIZE>>>(
-            d_a, d_b, d_out, count, 1u, 1);
-    }
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaMemcpy(
-        h_out, d_out, (size_t)count * sizeof(uint64_t), cudaMemcpyDeviceToHost));
-    return check_validation_output(stein_name, h_a, h_b, h_out, count);
-}
-
-static int validate_implementations(int use_u64,
-                                    const uint64_t *h_a,
-                                    const uint64_t *h_b,
-                                    const uint64_t *d_a,
-                                    const uint64_t *d_b,
-                                    uint64_t *d_out,
-                                    uint64_t *h_out,
-                                    uint32_t count) {
-    static const uint64_t u53_a[] = {
-        0ull, 0ull, 1ull, 25ull, U53_MASK, U53_MASK, 1ull << 52,
-        1ull << 52, U53_MASK - 2ull, (1ull << 52) + 1ull,
-    };
-    static const uint64_t u53_b[] = {
-        0ull, U53_MASK, U53_MASK, 18ull, U53_MASK - 2ull, 1ull,
-        1ull << 51, (1ull << 52) - 1ull, 3ull, (1ull << 51) + 1ull,
-    };
-    static const uint64_t u64_a[] = {
-        0ull,
-        0ull,
-        1ull,
-        25ull,
-        UINT64_MAX,
-        UINT64_MAX,
-        1ull << 63,
-        1ull << 53,
-        UINT64_C(17170434652806850245),
-        UINT64_C(17000554516544968789),
-        UINT64_C(0x8000000000000000),
-        UINT64_C(0xfffffffffffffffe),
-    };
-    static const uint64_t u64_b[] = {
-        0ull,
-        UINT64_MAX,
-        UINT64_MAX,
-        18ull,
-        UINT64_MAX - 2ull,
-        1ull,
-        1ull << 62,
-        (1ull << 53) + 1ull,
-        UINT64_C(11127183001224483315),
-        UINT64_C(15683058166996929849),
-        UINT64_C(0x4000000000000000),
-        UINT64_C(0x7ffffffffffffffe),
-    };
-    const uint64_t *regression_a = use_u64 ? u64_a : u53_a;
-    const uint64_t *regression_b = use_u64 ? u64_b : u53_b;
-    const uint32_t regression_count =
-        use_u64 ? (uint32_t)(sizeof(u64_a) / sizeof(u64_a[0]))
-                : (uint32_t)(sizeof(u53_a) / sizeof(u53_a[0]));
-    uint64_t regression_out[sizeof(u64_a) / sizeof(u64_a[0])];
-    uint64_t *d_regression_a = NULL;
-    uint64_t *d_regression_b = NULL;
-    uint64_t *d_regression_out = NULL;
-
-    if (validate_dataset(
-            use_u64, h_a, h_b, d_a, d_b, d_out, h_out, count) != 0) {
-        return 1;
-    }
-
-    CUDA_CHECK(cudaMalloc(
-        &d_regression_a, (size_t)regression_count * sizeof(uint64_t)));
-    CUDA_CHECK(cudaMalloc(
-        &d_regression_b, (size_t)regression_count * sizeof(uint64_t)));
-    CUDA_CHECK(cudaMalloc(
-        &d_regression_out, (size_t)regression_count * sizeof(uint64_t)));
-    CUDA_CHECK(cudaMemcpy(d_regression_a,
-                          regression_a,
-                          (size_t)regression_count * sizeof(uint64_t),
-                          cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_regression_b,
-                          regression_b,
-                          (size_t)regression_count * sizeof(uint64_t),
-                          cudaMemcpyHostToDevice));
-
-    if (validate_dataset(use_u64,
-                         regression_a,
-                         regression_b,
-                         d_regression_a,
-                         d_regression_b,
-                         d_regression_out,
-                         regression_out,
-                         regression_count) != 0) {
-        return 1;
-    }
-
-    CUDA_CHECK(cudaFree(d_regression_a));
-    CUDA_CHECK(cudaFree(d_regression_b));
-    CUDA_CHECK(cudaFree(d_regression_out));
-    printf("validation=ok workload=%s inputs=%u regression_cases=%u\n",
-           use_u64 ? "u64" : "u53",
-           count,
-           regression_count);
-    return 0;
-}
-
-static int run_benchmark(const char *name,
-                         int use_fp64,
-                         int use_u64,
-                         const uint64_t *d_a,
-                         const uint64_t *d_b,
-                         uint64_t *d_out,
-                         uint64_t *h_out,
-                         uint32_t count,
-                         uint32_t rounds,
-                         uint32_t launches,
-                         uint32_t block_size,
-                         int use_fixed_pair) {
-    cudaEvent_t start;
-    cudaEvent_t stop;
-    const uint32_t grid_size = (count + block_size - 1u) / block_size;
-
-    CUDA_CHECK(cudaEventCreate(&start));
-    CUDA_CHECK(cudaEventCreate(&stop));
-
-    if (use_fp64 && !use_u64) {
-        gcd_fp64_u53_kernel<<<grid_size, block_size>>>(d_a, d_b, d_out, count, rounds, use_fixed_pair);
-    } else if (!use_fp64 && !use_u64) {
-        gcd_stein_u53_kernel<<<grid_size, block_size>>>(d_a, d_b, d_out, count, rounds, use_fixed_pair);
-    } else if (use_fp64) {
-        gcd_fp64_u64_kernel<<<grid_size, block_size>>>(d_a, d_b, d_out, count, rounds, use_fixed_pair);
-    } else {
-        gcd_stein_u64_kernel<<<grid_size, block_size>>>(d_a, d_b, d_out, count, rounds, use_fixed_pair);
-    }
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
-
-    CUDA_CHECK(cudaEventRecord(start));
-    for (uint32_t i = 0; i < launches; ++i) {
-        if (use_fp64 && !use_u64) {
-            gcd_fp64_u53_kernel<<<grid_size, block_size>>>(d_a, d_b, d_out, count, rounds, use_fixed_pair);
-        } else if (!use_fp64 && !use_u64) {
-            gcd_stein_u53_kernel<<<grid_size, block_size>>>(d_a, d_b, d_out, count, rounds, use_fixed_pair);
-        } else if (use_fp64) {
-            gcd_fp64_u64_kernel<<<grid_size, block_size>>>(d_a, d_b, d_out, count, rounds, use_fixed_pair);
+    static void next(bool full, Word &x, Word &y) {
+        if (full) {
+            x = next_u64(x, 6364136223846793005ull, 1442695040888963407ull);
+            y = next_u64(y, 2862933555777941757ull, 3037000493ull);
         } else {
-            gcd_stein_u64_kernel<<<grid_size, block_size>>>(d_a, d_b, d_out, count, rounds, use_fixed_pair);
+            x = next_u53(x, 6364136223846793005ull, 1442695040888963407ull);
+            y = next_u53(y, 2862933555777941757ull, 3037000493ull);
         }
     }
-    CUDA_CHECK(cudaEventRecord(stop));
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaEventSynchronize(stop));
 
-    float elapsed_ms = 0.0f;
-    CUDA_CHECK(cudaEventElapsedTime(&elapsed_ms, start, stop));
-    CUDA_CHECK(cudaMemcpy(h_out, d_out, (size_t)count * sizeof(uint64_t), cudaMemcpyDeviceToHost));
-
-    uint64_t checksum = 0ull;
-    for (uint32_t i = 0; i < count; ++i) {
-        checksum ^= h_out[i];
+    static void launch(bool fp, bool full, uint32_t grid, uint32_t block,
+                       const Word *a, const Word *b, Word *out,
+                       uint32_t count, uint32_t rounds, bool fixed) {
+        if (fp && !full) {
+            gcd_fp64_u53_kernel<<<grid, block>>>(a, b, out, count, rounds, fixed);
+        } else if (!fp && !full) {
+            gcd_stein_u53_kernel<<<grid, block>>>(a, b, out, count, rounds, fixed);
+        } else if (fp) {
+            gcd_fp64_u64_kernel<<<grid, block>>>(a, b, out, count, rounds, fixed);
+        } else {
+            gcd_stein_u64_kernel<<<grid, block>>>(a, b, out, count, rounds, fixed);
+        }
     }
 
-    double total_calls = (double)count * (double)rounds * (double)launches;
-    double calls_per_second = total_calls / (elapsed_ms * 1.0e-3);
-    double ns_per_call = (elapsed_ms * 1.0e6) / total_calls;
-
-    printf("%s: elapsed_ms=%.3f calls=%.0f calls_per_second=%.3e ns_per_call=%.3f checksum=%016" PRIx64 "\n",
-           name,
-           elapsed_ms,
-           total_calls,
-           calls_per_second,
-           ns_per_call,
-           checksum);
-
-    CUDA_CHECK(cudaEventDestroy(start));
-    CUDA_CHECK(cudaEventDestroy(stop));
-    return 0;
-}
-
-int main(int argc, char **argv) {
-    const bench_mode mode = parse_mode_or_default(argc > 1 ? argv[1] : NULL);
-    const int use_u64 = mode_is_u64(mode);
-    const uint32_t count = parse_u32_or_default(argc > 2 ? argv[2] : NULL, 1u << 20);
-    const uint32_t rounds = parse_u32_or_default(argc > 3 ? argv[3] : NULL, 1024);
-    const uint32_t launches = parse_u32_or_default(argc > 4 ? argv[4] : NULL, 20);
-    const uint32_t block_size = parse_u32_or_default(argc > 5 ? argv[5] : NULL, 256);
-    const int use_fixed_pair = argc > 7;
-    uint64_t fixed_a = 0ull;
-    uint64_t fixed_b = 0ull;
-
-    if (use_fixed_pair &&
-        (!parse_u64_strict(argv[6], &fixed_a) ||
-         !parse_u64_strict(argv[7], &fixed_b))) {
-        fprintf(stderr, "invalid fixed pair; expected unsigned 64-bit integers\n");
-        return 2;
+    static void regressions(bool full, const Word *&a, const Word *&b, uint32_t &count) {
+        static const uint64_t u53_a[] = {
+            0ull, 0ull, 1ull, 25ull, U53_MASK, U53_MASK, 1ull << 52,
+            1ull << 52, U53_MASK - 2ull, (1ull << 52) + 1ull,
+        };
+        static const uint64_t u53_b[] = {
+            0ull, U53_MASK, U53_MASK, 18ull, U53_MASK - 2ull, 1ull,
+            1ull << 51, (1ull << 52) - 1ull, 3ull, (1ull << 51) + 1ull,
+        };
+        static const uint64_t u64_a[] = {
+            0ull,
+            0ull,
+            1ull,
+            25ull,
+            UINT64_MAX,
+            UINT64_MAX,
+            1ull << 63,
+            1ull << 53,
+            UINT64_C(17170434652806850245),
+            UINT64_C(17000554516544968789),
+            UINT64_C(0x8000000000000000),
+            UINT64_C(0xfffffffffffffffe),
+        };
+        static const uint64_t u64_b[] = {
+            0ull,
+            UINT64_MAX,
+            UINT64_MAX,
+            18ull,
+            UINT64_MAX - 2ull,
+            1ull,
+            1ull << 62,
+            (1ull << 53) + 1ull,
+            UINT64_C(11127183001224483315),
+            UINT64_C(15683058166996929849),
+            UINT64_C(0x4000000000000000),
+            UINT64_C(0x7ffffffffffffffe),
+        };
+        static_assert(sizeof(u53_a) == sizeof(u53_b), "regression pair lengths differ");
+        static_assert(sizeof(u64_a) == sizeof(u64_b), "regression pair lengths differ");
+        a = full ? u64_a : u53_a;
+        b = full ? u64_b : u53_b;
+        count = full ? sizeof(u64_a) / sizeof(Word) : sizeof(u53_a) / sizeof(Word);
     }
-    if (use_fixed_pair && !use_u64 &&
-        (fixed_a > U53_MASK || fixed_b > U53_MASK)) {
-        fprintf(stderr,
-                "invalid fixed pair for u53; expected values <= %" PRIu64 "\n",
-                (uint64_t)U53_MASK);
-        return 2;
-    }
+};
 
-    uint64_t *h_a = (uint64_t *)malloc((size_t)count * sizeof(uint64_t));
-    uint64_t *h_b = (uint64_t *)malloc((size_t)count * sizeof(uint64_t));
-    uint64_t *h_out = (uint64_t *)malloc((size_t)count * sizeof(uint64_t));
-    uint64_t *d_a = NULL;
-    uint64_t *d_b = NULL;
-    uint64_t *d_out = NULL;
-
-    if (h_a == NULL || h_b == NULL || h_out == NULL) {
-        fprintf(stderr, "host allocation failed\n");
-        free(h_a);
-        free(h_b);
-        free(h_out);
-        return 1;
-    }
-
-    fill_inputs(h_a, h_b, count, use_u64, use_fixed_pair, fixed_a, fixed_b);
-
-    CUDA_CHECK(cudaMalloc(&d_a, (size_t)count * sizeof(uint64_t)));
-    CUDA_CHECK(cudaMalloc(&d_b, (size_t)count * sizeof(uint64_t)));
-    CUDA_CHECK(cudaMalloc(&d_out, (size_t)count * sizeof(uint64_t)));
-    CUDA_CHECK(cudaMemcpy(d_a, h_a, (size_t)count * sizeof(uint64_t), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_b, h_b, (size_t)count * sizeof(uint64_t), cudaMemcpyHostToDevice));
-
-    printf("mode=%s count=%u rounds=%u launches=%u block_size=%u",
-           mode_name(mode),
-           count,
-           rounds,
-           launches,
-           block_size);
-    if (use_fixed_pair) {
-        printf(" fixed_pair=%" PRIu64 ",%" PRIu64, fixed_a, fixed_b);
-    }
-    putchar('\n');
-
-    if (validate_implementations(
-            use_u64, h_a, h_b, d_a, d_b, d_out, h_out, count) != 0) {
-        return 1;
-    }
-
-    if (mode_runs_fp64(mode) &&
-        run_benchmark(use_u64 ? "fp64_u64" : "fp64_u53",
-                      1,
-                      use_u64,
-                      d_a,
-                      d_b,
-                      d_out,
-                      h_out,
-                      count,
-                      rounds,
-                      launches,
-                      block_size,
-                      use_fixed_pair) != 0) {
-        return 1;
-    }
-
-    if (mode_runs_stein(mode) &&
-        run_benchmark(use_u64 ? "stein_u64" : "stein_u53",
-                      0,
-                      use_u64,
-                      d_a,
-                      d_b,
-                      d_out,
-                      h_out,
-                      count,
-                      rounds,
-                      launches,
-                      block_size,
-                      use_fixed_pair) != 0) {
-        return 1;
-    }
-
-    CUDA_CHECK(cudaFree(d_a));
-    CUDA_CHECK(cudaFree(d_b));
-    CUDA_CHECK(cudaFree(d_out));
-    free(h_a);
-    free(h_b);
-    free(h_out);
-    return 0;
-}
+#include "bench_host.cuh"
